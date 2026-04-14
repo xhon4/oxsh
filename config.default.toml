@@ -1,0 +1,49 @@
+# oxsh shell configuration
+# https://github.com/oxsh — next-gen hybrid shell
+
+on_startup = [
+    "fastfetch",
+]
+
+[shell]
+auto_cd = true
+glob = true
+
+[prompt]
+left = "{cwd:short} {git:branch} {context} {status}"
+right = "{duration}"
+vi_mode = false
+
+[history]
+max_size = 50000
+file = "~/.oxsh_history"
+ignore_dups = true
+
+[path]
+prepend = [
+    "~/.cargo/bin",
+    "~/.local/bin",
+]
+scan_dirs = [
+    "~/.config/alacritty/zsh/helpers",
+]
+
+[aliases]
+ls = "eza --icons --group-directories-first"
+ll = "eza -l --icons --git"
+la = "eza -la --icons --git"
+cat = "bat --style=plain"
+".." = "cd .."
+"..." = "cd ../.."
+grep = "grep --color=auto"
+update = "sudo pacman -Syu"
+# Structured pipeline shortcuts
+jq = "from-json"
+pods = "kubectl get pods -o json"
+
+[env]
+EDITOR = "nvim"
+RADV_PERFTEST = "aco,ngg"
+AMD_VULKAN_ICD = "RADV"
+mesa_glthread = "true"
+MESA_GL_VERSION_OVERRIDE = "4.6"

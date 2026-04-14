@@ -1,0 +1,33 @@
+[package]
+name = "oxsh"
+version = "0.2.0"
+edition = "2024"
+authors = ["occhi"]
+description = "A next-generation shell combining POSIX compatibility, structured pipelines, and modern UX"
+license = "MIT"
+repository = "https://github.com/xhon4/oxsh"
+homepage = "https://github.com/xhon4/oxsh"
+readme = "README.md"
+keywords = ["shell", "terminal", "cli", "pipeline", "structured-data"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+crossterm = "0.29.0"
+dirs-next = "2.0.0"
+fuzzy-matcher = "0.3"
+glob = "0.3.3"
+indexmap = { version = "2.0", features = ["serde"] }
+nu-ansi-term = "0.50.3"
+reedline = "0.47.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+shellexpand = "3.1.2"
+strsim = "0.11"
+toml = "1.1.2"
+which = "8.0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

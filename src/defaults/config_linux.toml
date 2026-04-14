@@ -1,0 +1,42 @@
+# oxsh shell configuration — Linux/macOS
+# Edit this file to customize your shell.
+# Reload with: source  (or just: reload)
+
+on_startup = [
+    # "fastfetch",
+]
+
+[shell]
+auto_cd = true
+glob = true
+
+[prompt]
+left = "{cwd:short} {git:branch} {context} {status}"
+right = "{duration}"
+vi_mode = false
+
+[history]
+max_size = 50000
+file = "~/.oxsh_history"
+ignore_dups = true
+
+[path]
+prepend = [
+    "~/.cargo/bin",
+    "~/.local/bin",
+]
+scan_dirs = []
+
+[aliases]
+ls = "eza --icons --group-directories-first"
+ll = "eza -l --icons --git"
+la = "eza -la --icons --git"
+cat = "bat --style=plain"
+".." = "cd .."
+"..." = "cd ../.."
+grep = "grep --color=auto"
+# Structured pipeline shortcuts
+jq = "from-json"
+
+[env]
+EDITOR = "nvim"

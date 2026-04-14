@@ -1,0 +1,34 @@
+# oxsh shell configuration — Windows
+# Edit this file to customize your shell.
+# Reload with: source  (or just: reload)
+
+on_startup = []
+
+[shell]
+auto_cd = true
+glob = true
+
+[prompt]
+left = "{cwd:short} {git:branch} {context} {status}"
+right = "{duration}"
+vi_mode = false
+
+[history]
+max_size = 50000
+file = "~/.oxsh_history"
+ignore_dups = true
+
+[path]
+prepend = []
+scan_dirs = []
+
+[aliases]
+ls = "dir"
+ll = "dir"
+".." = "cd .."
+grep = "findstr"
+# Structured pipeline shortcuts
+jq = "from-json"
+
+[env]
+EDITOR = "notepad"
