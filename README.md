@@ -1,6 +1,6 @@
-# 🐂 oxsh
+# 🔮 oxsh
 
-A next-generation hybrid shell built in Rust. oxsh blends POSIX compatibility with structured data pipelines, real-time editing feedback, and environment-aware intelligence — all in a ~1.5 MB self-contained binary.
+Hybrid shell built in Rust. oxsh blends POSIX compatibility with structured data pipelines, real-time editing feedback, and environment-aware intelligence.
 
 ## ✨ Features
 
