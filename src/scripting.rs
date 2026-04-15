@@ -30,36 +30,48 @@ impl ShellVars {
     }
 }
 
-/// Check if a line is a variable assignment: VAR=value
+/// Check if a line is a variable assignment: VAR=value or VAR=$(cmd) etc.
+///
+/// Returns Some((key, raw_value_str)) where raw_value_str is the raw RHS
+/// (not yet expanded — caller is responsible for expansion).
+///
+/// We only validate the LHS identifier. We do NOT strip quotes here because
+/// the caller may need to expand subshells inside the value first.
 pub fn is_var_assignment(input: &str) -> Option<(&str, &str)> {
-    // Must not start with = and must contain =
-    // Must start with letter or _, followed by alphanumeric/_
     let bytes = input.as_bytes();
     if bytes.is_empty() || bytes[0] == b'=' {
         return None;
     }
 
+    // Find the first `=` that is not inside quotes or a subshell.
+    // We only look at the identifier characters before the `=`.
     let eq_pos = input.find('=')?;
     let key = &input[..eq_pos];
 
-    // Validate key: must be valid identifier
-    if !key
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '_')
-        || key.chars().next().map_or(true, |c| c.is_ascii_digit())
-    {
+    // Validate key: must be valid shell identifier (letter/_ first, then alnum/_)
+    if key.is_empty() {
+        return None;
+    }
+    let mut chars = key.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return None;
+    }
+    if !chars.all(|c| c.is_alphanumeric() || c == '_') {
         return None;
     }
 
     let val = &input[eq_pos + 1..];
-    // Strip surrounding quotes if present
-    let val = val
-        .strip_prefix('"')
+    Some((key, val))
+}
+
+/// Strip surrounding quotes from an already-expanded value string.
+/// Call this after subshell/variable expansion if the value came from a literal.
+pub fn strip_quotes(val: &str) -> &str {
+    val.strip_prefix('"')
         .and_then(|v| v.strip_suffix('"'))
         .or_else(|| val.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
-        .unwrap_or(val);
-
-    Some((key, val))
+        .unwrap_or(val)
 }
 
 /// Expand $VAR and ${VAR} references using shell vars + env
@@ -90,7 +102,7 @@ pub fn expand_shell_vars(tokens: &mut Vec<String>, vars: &ShellVars) {
                         result.push_str(&val);
                     }
                 } else if chars[i] == '?' {
-                    // $? → last exit code (handled elsewhere via env)
+                    // $? → last exit code
                     if let Some(val) = vars.resolve("?") {
                         result.push_str(&val);
                     }
@@ -115,34 +127,36 @@ pub fn expand_shell_vars(tokens: &mut Vec<String>, vars: &ShellVars) {
     }
 }
 
+// ── Control flow structures ──
+
 /// Parse and evaluate `for VAR in ITEMS; do BODY; done` (single-line)
-/// Returns Some(list of body lines to execute) or None if not a for loop.
 pub fn parse_for_loop(input: &str) -> Option<ForLoop> {
     let trimmed = input.trim();
     if !trimmed.starts_with("for ") {
         return None;
     }
 
-    // for VAR in ITEM1 ITEM2 ...; do BODY; done
     let rest = &trimmed[4..];
     let in_pos = rest.find(" in ")?;
     let var = rest[..in_pos].trim().to_string();
     let after_in = &rest[in_pos + 4..];
 
-    // Find "; do " or " do "
     let do_pos = after_in.find("; do ").or_else(|| after_in.find(" do "))?;
-    let items_str = &after_in[..do_pos].trim();
+    let items_str = after_in[..do_pos].trim();
     let do_offset = if after_in[do_pos..].starts_with("; do ") { 5 } else { 4 };
     let body_and_done = &after_in[do_pos + do_offset..];
 
-    // Find "; done" or " done"
     let done_str = body_and_done.trim_end();
-    let body = done_str.strip_suffix("; done")
+    let body = done_str
+        .strip_suffix("; done")
         .or_else(|| done_str.strip_suffix(";done"))
         .or_else(|| done_str.strip_suffix(" done"))
         .or_else(|| done_str.strip_suffix("done"))?;
 
-    let items: Vec<String> = items_str.split_whitespace().map(|s| s.to_string()).collect();
+    let items: Vec<String> = items_str
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect();
 
     Some(ForLoop {
         var,
@@ -154,6 +168,39 @@ pub fn parse_for_loop(input: &str) -> Option<ForLoop> {
 pub struct ForLoop {
     pub var: String,
     pub items: Vec<String>,
+    pub body: String,
+}
+
+/// Parse `while COND; do BODY; done` (single-line)
+pub fn parse_while_loop(input: &str) -> Option<WhileLoop> {
+    let trimmed = input.trim();
+    if !trimmed.starts_with("while ") {
+        return None;
+    }
+
+    let rest = &trimmed[6..];
+
+    // Find "; do " or " do "
+    let do_pos = rest.find("; do ").or_else(|| rest.find(" do "))?;
+    let condition = rest[..do_pos].trim().to_string();
+    let do_offset = if rest[do_pos..].starts_with("; do ") { 5 } else { 4 };
+    let body_and_done = &rest[do_pos + do_offset..];
+
+    let done_str = body_and_done.trim_end();
+    let body = done_str
+        .strip_suffix("; done")
+        .or_else(|| done_str.strip_suffix(";done"))
+        .or_else(|| done_str.strip_suffix(" done"))
+        .or_else(|| done_str.strip_suffix("done"))?;
+
+    Some(WhileLoop {
+        condition: condition,
+        body: body.trim().to_string(),
+    })
+}
+
+pub struct WhileLoop {
+    pub condition: String,
     pub body: String,
 }
 
@@ -170,11 +217,11 @@ pub fn parse_if(input: &str) -> Option<IfBlock> {
     let after_then = &rest[then_pos + 7..];
 
     let fi_trimmed = after_then.trim_end();
-    let body_section = fi_trimmed.strip_suffix("; fi")
+    let body_section = fi_trimmed
+        .strip_suffix("; fi")
         .or_else(|| fi_trimmed.strip_suffix(";fi"))
         .or_else(|| fi_trimmed.strip_suffix(" fi"))?;
 
-    // Check for else
     if let Some(else_pos) = body_section.find("; else ") {
         let then_body = body_section[..else_pos].trim().to_string();
         let else_body = body_section[else_pos + 7..].trim().to_string();

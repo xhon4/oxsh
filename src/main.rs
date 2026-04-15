@@ -181,6 +181,8 @@ fn main() {
         .with_menu(ReedlineMenu::EngineCompleter(completion_menu));
 
     let mut shell = shell::Shell::new(config, line_editor);
+    // Provide pre-scanned command list so typo suggestions don't re-scan PATH
+    shell.seed_known_commands(commands);
     shell.run();
 }
 
