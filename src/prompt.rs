@@ -9,15 +9,31 @@ use std::sync::OnceLock;
 const SEP: &str = "\u{e0b0}"; // 
 const RSEP: &str = "\u{e0b2}"; // 
 
-/// Cache hostname — read from /etc/hostname once on first access
+/// Cache hostname — tries multiple sources for portability across Linux/macOS/BSD.
 fn cached_hostname() -> &'static str {
     static HOSTNAME: OnceLock<String> = OnceLock::new();
     HOSTNAME.get_or_init(|| {
-        std::fs::read_to_string("/etc/hostname")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_default()
+        // 1. Linux: /etc/hostname
+        if let Ok(h) = std::fs::read_to_string("/etc/hostname") {
+            let h = h.trim().to_string();
+            if !h.is_empty() {
+                return h;
+            }
+        }
+        // 2. $HOSTNAME (bash sets this; also works on many systems)
+        if let Ok(h) = env::var("HOSTNAME") {
+            if !h.is_empty() {
+                return h;
+            }
+        }
+        // 3. `hostname` command (macOS, BSD, Alpine, etc.)
+        if let Ok(out) = std::process::Command::new("hostname").output() {
+            let h = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !h.is_empty() {
+                return h;
+            }
+        }
+        String::new()
     })
 }
 

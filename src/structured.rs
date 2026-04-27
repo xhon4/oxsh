@@ -43,20 +43,23 @@ pub fn run_structured(cmd: &str, args: &[String], input: &str) -> (String, i32, 
     }
 }
 
-/// Parse input: try JSON first, fall back to list of lines
+/// Parse input: try JSON first, fall back to list of lines.
+/// Warns when the input looks like JSON but fails to parse.
 fn parse_input(input: &str) -> Value {
     let trimmed = input.trim();
     if let Ok(val) = Value::from_json(trimmed) {
-        val
-    } else {
-        Value::List(
-            input
-                .lines()
-                .filter(|l| !l.is_empty())
-                .map(|l| Value::String(l.to_string()))
-                .collect(),
-        )
+        return val;
     }
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        eprintln!("oxsh: warning: input looks like JSON but could not be parsed — treating as text lines");
+    }
+    Value::List(
+        input
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| Value::String(l.to_string()))
+            .collect(),
+    )
 }
 
 fn cmd_from_json(input: &str) -> (String, i32, bool) {

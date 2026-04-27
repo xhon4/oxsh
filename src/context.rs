@@ -85,6 +85,7 @@ impl ShellContext {
     }
 
     /// Get cargo subcommands if in a Rust project
+    #[allow(dead_code)]
     pub fn cargo_targets(&self) -> Vec<String> {
         if self.project_type != Some(ProjectType::Rust) {
             return Vec::new();
@@ -100,36 +101,45 @@ impl ShellContext {
     }
 }
 
+/// Walk the directory tree once, checking all project markers at each level.
+/// Priority within a directory level follows the order below (Rust > Node > Go …).
+/// This replaces N separate `find_up` calls (one per project type) with a single walk.
 fn detect_project_type(dir: &Path) -> Option<ProjectType> {
-    if find_up(dir, "Cargo.toml").is_some() {
-        return Some(ProjectType::Rust);
-    }
-    if find_up(dir, "package.json").is_some() {
-        return Some(ProjectType::Node);
-    }
-    if find_up(dir, "go.mod").is_some() {
-        return Some(ProjectType::Go);
-    }
-    if find_up(dir, "pyproject.toml").is_some()
-        || find_up(dir, "setup.py").is_some()
-        || find_up(dir, "requirements.txt").is_some()
-    {
-        return Some(ProjectType::Python);
-    }
-    if find_up(dir, "pom.xml").is_some() || find_up(dir, "build.gradle").is_some() {
-        return Some(ProjectType::Java);
-    }
-    if dir.join("k8s").is_dir()
-        || dir.join("kubernetes").is_dir()
-        || find_up(dir, "skaffold.yaml").is_some()
-    {
-        return Some(ProjectType::Kubernetes);
-    }
-    if find_up(dir, "Dockerfile").is_some()
-        || find_up(dir, "docker-compose.yml").is_some()
-        || find_up(dir, "compose.yml").is_some()
-    {
-        return Some(ProjectType::Docker);
+    let mut current = dir.to_path_buf();
+    loop {
+        if current.join("Cargo.toml").exists() {
+            return Some(ProjectType::Rust);
+        }
+        if current.join("package.json").exists() {
+            return Some(ProjectType::Node);
+        }
+        if current.join("go.mod").exists() {
+            return Some(ProjectType::Go);
+        }
+        if current.join("pyproject.toml").exists()
+            || current.join("setup.py").exists()
+            || current.join("requirements.txt").exists()
+        {
+            return Some(ProjectType::Python);
+        }
+        if current.join("pom.xml").exists() || current.join("build.gradle").exists() {
+            return Some(ProjectType::Java);
+        }
+        if current.join("k8s").is_dir()
+            || current.join("kubernetes").is_dir()
+            || current.join("skaffold.yaml").exists()
+        {
+            return Some(ProjectType::Kubernetes);
+        }
+        if current.join("Dockerfile").exists()
+            || current.join("docker-compose.yml").exists()
+            || current.join("compose.yml").exists()
+        {
+            return Some(ProjectType::Docker);
+        }
+        if !current.pop() {
+            break;
+        }
     }
     None
 }

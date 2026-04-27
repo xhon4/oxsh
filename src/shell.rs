@@ -134,13 +134,20 @@ impl Shell {
                         continue;
                     }
 
-                    // !! expansion
-                    let input = if trimmed.contains("!!") {
+                    // History expansion: !! and !$
+                    let input = if trimmed.contains("!!") || trimmed.contains("!$") {
                         if self.last_command.is_empty() {
                             eprintln!("oxsh: no previous command");
                             continue;
                         }
-                        trimmed.replace("!!", &self.last_command)
+                        let last_arg = self.last_command
+                            .split_whitespace()
+                            .last()
+                            .unwrap_or("")
+                            .to_string();
+                        trimmed
+                            .replace("!!", &self.last_command)
+                            .replace("!$", &last_arg)
                     } else {
                         trimmed.to_string()
                     };
@@ -233,7 +240,10 @@ impl Shell {
 
             // While loop
             if let Some(while_loop) = scripting::parse_while_loop(segment) {
-                // Safety cap: max 10000 iterations to prevent infinite loops from typos
+                let max_iter: usize = std::env::var("OXSH_MAX_ITERATIONS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1_000_000);
                 let mut iterations = 0usize;
                 loop {
                     let cond_code = self.execute_line_inner(&while_loop.condition);
@@ -242,8 +252,10 @@ impl Shell {
                     }
                     self.last_exit_code = self.execute_line_inner(&while_loop.body);
                     iterations += 1;
-                    if iterations >= 10_000 {
-                        eprintln!("oxsh: while loop exceeded 10000 iterations, stopping");
+                    if iterations >= max_iter {
+                        eprintln!(
+                            "oxsh: while loop exceeded {max_iter} iterations (set OXSH_MAX_ITERATIONS to raise)"
+                        );
                         self.last_exit_code = 1;
                         break;
                     }
@@ -289,14 +301,35 @@ impl Shell {
 
             // Expand subshells, then tokenize + expand
             let expanded_segment = parser::expand_subshells(segment);
-            let mut tokens = parser::tokenize(&expanded_segment);
+            let (mut tokens, mut quoted_flags) =
+                parser::tokenize_with_quote_flags(&expanded_segment);
             if tokens.is_empty() {
                 continue;
             }
             scripting::expand_shell_vars(&mut tokens, &self.shell_vars);
             parser::expand_vars(&mut tokens);
+            // Track alias resolution: it may replace token[0] with N tokens
+            let before_alias = tokens.len();
             parser::resolve_alias(&mut tokens, &self.aliases);
-            parser::expand_globs(&mut tokens);
+            let after_alias = tokens.len();
+            if after_alias != before_alias {
+                // Rebuild quote flags: alias-injected tokens are unquoted,
+                // original tokens[1..] keep their flags
+                let alias_count = (after_alias + 1).saturating_sub(before_alias);
+                let mut new_flags = vec![false; alias_count];
+                if quoted_flags.len() > 1 {
+                    new_flags.extend_from_slice(
+                        &quoted_flags[1..before_alias.min(quoted_flags.len())],
+                    );
+                }
+                new_flags.resize(after_alias, false);
+                quoted_flags = new_flags;
+            } else {
+                quoted_flags.resize(after_alias, false);
+            }
+            parser::expand_braces(&mut tokens);
+            quoted_flags.resize(tokens.len(), false);
+            parser::expand_globs_respecting_quotes(&mut tokens, &quoted_flags);
 
             if tokens.is_empty() {
                 continue;
@@ -371,7 +404,7 @@ impl Shell {
     ///   `tokens.join(" ")` → `parse_pipeline(string)`
     /// we split the already-expanded tokens on pipe markers and build
     /// Commands directly, preserving arguments with spaces.
-    fn execute_tokens(&self, tokens: Vec<String>, original_segment: &str) -> i32 {
+    fn execute_tokens(&self, tokens: Vec<String>, _original_segment: &str) -> i32 {
         // Split tokens into pipe stages on "|" token boundaries.
         // Redirect tokens (>, >>, <, 2>, 2>>, 2>&1) are handled per-stage.
         let stages = split_tokens_on_pipes(tokens);
@@ -398,7 +431,7 @@ impl Shell {
             "alias" => {
                 if tokens.len() == 1 {
                     let mut sorted: Vec<_> = self.aliases.iter().collect();
-                    sorted.sort_by_key(|(k, _)| k.clone());
+                    sorted.sort_by_key(|(k, _)| k.as_str());
                     for (k, v) in sorted {
                         println!("alias {k}='{v}'");
                     }
@@ -487,8 +520,54 @@ impl Shell {
                 }
                 Some(0)
             }
+            "read" => {
+                // read [-p "prompt string"] VARNAME
+                // Reads one line from stdin into VARNAME (default: REPLY)
+                use std::io::Write;
+                let mut prompt_str = String::new();
+                let mut var_name = "REPLY";
+                let mut idx = 1;
+                while idx < tokens.len() {
+                    if tokens[idx] == "-p" && idx + 1 < tokens.len() {
+                        prompt_str = tokens[idx + 1].clone();
+                        idx += 2;
+                    } else {
+                        var_name = &tokens[idx];
+                        idx += 1;
+                    }
+                }
+                if !prompt_str.is_empty() {
+                    print!("{prompt_str}");
+                    std::io::stdout().flush().ok();
+                }
+                let mut line = String::new();
+                match std::io::stdin().read_line(&mut line) {
+                    Ok(0) => return Some(1), // EOF
+                    Ok(_) => {
+                        let value = line.trim_end_matches('\n').trim_end_matches('\r');
+                        self.shell_vars.set(var_name, value);
+                        Some(0)
+                    }
+                    Err(e) => {
+                        eprintln!("read: {e}");
+                        Some(1)
+                    }
+                }
+            }
             _ => None,
         }
+    }
+
+    /// Execute a command string through the full interactive pipeline.
+    /// Used by `-c` mode so all shell features (`;`, `&&`, loops, builtins) work.
+    pub fn run_command(&mut self, input: &str) -> i32 {
+        self.handle_input(input);
+        self.last_exit_code
+    }
+
+    /// Set a positional parameter ($1, $2, ...) used by `-c` script mode.
+    pub fn set_positional(&mut self, n: usize, value: &str) {
+        self.shell_vars.set(&n.to_string(), value);
     }
 
     /// Execute a single line as a command (used by for/while/if bodies and recursion).
@@ -507,14 +586,29 @@ impl Shell {
         }
 
         let expanded = parser::expand_subshells(input);
-        let mut tokens = parser::tokenize(&expanded);
+        let (mut tokens, mut quoted_flags) = parser::tokenize_with_quote_flags(&expanded);
         if tokens.is_empty() {
             return 0;
         }
         scripting::expand_shell_vars(&mut tokens, &self.shell_vars);
         parser::expand_vars(&mut tokens);
+        let before = tokens.len();
         parser::resolve_alias(&mut tokens, &self.config.aliases);
-        parser::expand_globs(&mut tokens);
+        let after = tokens.len();
+        if after != before {
+            let alias_count = (after + 1).saturating_sub(before);
+            let mut new_flags = vec![false; alias_count];
+            if quoted_flags.len() > 1 {
+                new_flags.extend_from_slice(&quoted_flags[1..before.min(quoted_flags.len())]);
+            }
+            new_flags.resize(after, false);
+            quoted_flags = new_flags;
+        } else {
+            quoted_flags.resize(after, false);
+        }
+        parser::expand_braces(&mut tokens);
+        quoted_flags.resize(tokens.len(), false);
+        parser::expand_globs_respecting_quotes(&mut tokens, &quoted_flags);
 
         if tokens.is_empty() {
             return 0;

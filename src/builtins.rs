@@ -36,7 +36,7 @@ pub static BUILTIN_NAMES: &[&str] = &[
     "cd", "exit", "quit", "export", "unset", "pwd", "which",
     "echo", "true", "false", "help", "type", "context",
     "alias", "unalias", "source", ".", "history", "reload",
-    "back", "next",
+    "back", "next", "read",
 ];
 
 fn builtin_cd(args: &[String]) -> i32 {
@@ -131,6 +131,7 @@ fn builtin_help() -> i32 {
     println!("  source [file]     Reload config (~/.oxshrc)");
     println!("  back              Go to previous directory");
     println!("  next              Go to next directory");
+    println!("  read [-p P] VAR   Read a line from stdin into VAR (default: REPLY)");
     println!("  context           Show detected project context");
     println!("  help              Show this help");
     println!("  exit              Exit the shell");

@@ -17,6 +17,7 @@ impl ShellVars {
         self.vars.insert(key.to_string(), val.to_string());
     }
 
+    #[allow(dead_code)]
     pub fn get(&self, key: &str) -> Option<&str> {
         self.vars.get(key).map(|s| s.as_str())
     }
@@ -74,7 +75,17 @@ pub fn strip_quotes(val: &str) -> &str {
         .unwrap_or(val)
 }
 
-/// Expand $VAR and ${VAR} references using shell vars + env
+/// Expand $VAR, ${VAR}, and special variables in tokens using shell vars + env.
+///
+/// Special variables supported:
+///   $?  last exit code
+///   $$  current process PID
+///   $0  shell name (oxsh)
+///   $#  number of positional parameters (stored in shell var "#")
+///   $@  all positional parameters (stored in shell var "@")
+///   $*  all positional parameters as single word (same as $@)
+///   $!  last background process PID (stored in shell var "!")
+///   $1..$9  positional parameters
 pub fn expand_shell_vars(tokens: &mut Vec<String>, vars: &ShellVars) {
     for token in tokens.iter_mut() {
         if !token.contains('$') {
@@ -87,35 +98,69 @@ pub fn expand_shell_vars(tokens: &mut Vec<String>, vars: &ShellVars) {
         while i < chars.len() {
             if chars[i] == '$' && i + 1 < chars.len() {
                 i += 1;
-                if chars[i] == '{' {
-                    // ${VAR}
-                    i += 1;
-                    let start = i;
-                    while i < chars.len() && chars[i] != '}' {
+                match chars[i] {
+                    '{' => {
+                        // ${VAR} or ${VAR:-default} (default not yet supported — just expand)
+                        i += 1;
+                        let start = i;
+                        while i < chars.len() && chars[i] != '}' {
+                            i += 1;
+                        }
+                        let name: String = chars[start..i].iter().collect();
+                        if i < chars.len() {
+                            i += 1; // skip }
+                        }
+                        if let Some(val) = vars.resolve(&name) {
+                            result.push_str(&val);
+                        }
+                    }
+                    '?' => {
+                        result.push_str(vars.resolve("?").as_deref().unwrap_or("0"));
                         i += 1;
                     }
-                    let name: String = chars[start..i].iter().collect();
-                    if i < chars.len() {
-                        i += 1; // skip }
-                    }
-                    if let Some(val) = vars.resolve(&name) {
-                        result.push_str(&val);
-                    }
-                } else if chars[i] == '?' {
-                    // $? → last exit code
-                    if let Some(val) = vars.resolve("?") {
-                        result.push_str(&val);
-                    }
-                    i += 1;
-                } else {
-                    // $VAR
-                    let start = i;
-                    while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                    '$' => {
+                        // $$ → current process PID
+                        result.push_str(&std::process::id().to_string());
                         i += 1;
                     }
-                    let name: String = chars[start..i].iter().collect();
-                    if let Some(val) = vars.resolve(&name) {
-                        result.push_str(&val);
+                    '!' => {
+                        // $! → last background PID
+                        result.push_str(vars.resolve("!").as_deref().unwrap_or(""));
+                        i += 1;
+                    }
+                    '#' => {
+                        // $# → number of positional parameters
+                        result.push_str(vars.resolve("#").as_deref().unwrap_or("0"));
+                        i += 1;
+                    }
+                    '@' | '*' => {
+                        // $@ / $* → all positional parameters
+                        result.push_str(vars.resolve("@").as_deref().unwrap_or(""));
+                        i += 1;
+                    }
+                    '0' => {
+                        // $0 → shell name
+                        result.push_str(vars.resolve("0").as_deref().unwrap_or("oxsh"));
+                        i += 1;
+                    }
+                    c if c.is_ascii_digit() => {
+                        // $1..$9 → positional parameters
+                        let digit = c.to_string();
+                        result.push_str(vars.resolve(&digit).as_deref().unwrap_or(""));
+                        i += 1;
+                    }
+                    _ => {
+                        // $VAR
+                        let start = i;
+                        while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                            i += 1;
+                        }
+                        let name: String = chars[start..i].iter().collect();
+                        if name.is_empty() {
+                            result.push('$');
+                        } else if let Some(val) = vars.resolve(&name) {
+                            result.push_str(&val);
+                        }
                     }
                 }
             } else {
@@ -194,7 +239,7 @@ pub fn parse_while_loop(input: &str) -> Option<WhileLoop> {
         .or_else(|| done_str.strip_suffix("done"))?;
 
     Some(WhileLoop {
-        condition: condition,
+        condition,
         body: body.trim().to_string(),
     })
 }

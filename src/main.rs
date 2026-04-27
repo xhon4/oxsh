@@ -58,23 +58,18 @@ fn main() {
     let config = Config::load();
     config.apply_env();
 
-    // oxsh -c "command"
+    // oxsh -c "command [args...]"
+    // Route through the full shell engine so `;`, `&&`, loops, and all
+    // builtins (including stateful ones like `read`) work correctly.
     if args.len() > 2 && args[1] == "-c" {
-        let cmd = parser::expand_subshells(&args[2]);
-        let pipeline = parser::parse_pipeline(&cmd);
-
-        // Only try builtins for single commands (no pipeline)
-        if pipeline.len() == 1 {
-            let mut tokens = parser::tokenize(&cmd);
-            parser::expand_vars(&mut tokens);
-            parser::resolve_alias(&mut tokens, &config.aliases);
-            parser::expand_globs(&mut tokens);
-            if let Some(code) = builtins::try_builtin(&tokens) {
-                std::process::exit(code);
-            }
+        let line_editor = Reedline::create();
+        let mut sh = shell::Shell::new(config, line_editor);
+        // Expose positional parameters ($1, $2, ...) for script use
+        for (i, arg) in args.iter().skip(3).enumerate() {
+            sh.set_positional(i + 1, arg);
         }
-
-        std::process::exit(executor::execute_pipeline(pipeline));
+        let exit_code = sh.run_command(&args[2]);
+        std::process::exit(exit_code);
     }
 
     // ── Startup: parallelize PATH scan with on_startup commands ──
@@ -154,7 +149,7 @@ fn main() {
     let commands = path_handle.join().unwrap_or_default();
     let highlighter = OxshHighlighter::new();
     highlighter.seed_commands(&commands);
-    let completer = Box::new(OxshCompleter::new(commands));
+    let completer = Box::new(OxshCompleter::new(commands.clone()));
     let completion_menu = Box::new(
         ColumnarMenu::default()
             .with_name("completion_menu")

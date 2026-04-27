@@ -179,7 +179,9 @@ fn merge_stderr_to_stdout() -> Stdio {
     #[cfg(unix)]
     {
         use std::os::unix::io::FromRawFd;
-        // stdout is always fd 1 on Unix
+        // SAFETY: fd 1 is always stdout on POSIX systems and remains valid for the
+        // lifetime of the process. The resulting Stdio duplicates the fd internally,
+        // so the original fd 1 is not closed or invalidated.
         unsafe { Stdio::from_raw_fd(1) }
     }
     #[cfg(windows)]
