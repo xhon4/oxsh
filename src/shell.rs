@@ -240,6 +240,15 @@ impl Shell {
 
             // While loop
             if let Some(while_loop) = scripting::parse_while_loop(segment) {
+                // An empty condition would loop until the iteration cap; reject it.
+                if while_loop.condition.trim().is_empty() {
+                    eprintln!("oxsh: while: empty condition");
+                    self.last_exit_code = 2;
+                    if should_skip(op, self.last_exit_code) {
+                        break;
+                    }
+                    continue;
+                }
                 let max_iter: usize = std::env::var("OXSH_MAX_ITERATIONS")
                     .ok()
                     .and_then(|v| v.parse().ok())

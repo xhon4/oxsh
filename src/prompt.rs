@@ -95,12 +95,14 @@ impl OxshPrompt {
                 } else {
                     format!(" {}", cwd.display())
                 };
+                let text = crate::context::sanitize_label(&text);
                 Some(Segment { text: format!("{text} "), fg: Color::White, bg: Color::DarkCyan })
             }
             "cwd:full" => {
                 let cwd = env::current_dir().unwrap_or_default();
+                let cwd = crate::context::sanitize_label(&cwd.display().to_string());
                 Some(Segment {
-                    text: format!(" {} ", cwd.display()),
+                    text: format!(" {cwd} "),
                     fg: Color::White,
                     bg: Color::DarkCyan,
                 })

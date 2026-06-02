@@ -63,14 +63,15 @@ impl ShellContext {
         Self {
             project_type: detect_project_type(&cwd),
             git_repo: find_up(&cwd, ".git").is_some(),
-            git_branch: detect_git_branch(&cwd),
+            git_branch: detect_git_branch(&cwd).map(|b| sanitize_label(&b)),
             in_ssh: env::var("SSH_CONNECTION").is_ok() || env::var("SSH_TTY").is_ok(),
-            k8s_context: detect_k8s_context(),
+            k8s_context: detect_k8s_context().map(|c| sanitize_label(&c)),
             virtualenv: env::var("VIRTUAL_ENV").ok().map(|v| {
-                Path::new(&v)
+                let name = Path::new(&v)
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or(v)
+                    .unwrap_or(v);
+                sanitize_label(&name)
             }),
         }
     }
@@ -83,22 +84,13 @@ impl ShellContext {
         let cwd = env::current_dir().unwrap_or_default();
         read_npm_scripts(&cwd).unwrap_or_default()
     }
+}
 
-    /// Get cargo subcommands if in a Rust project
-    #[allow(dead_code)]
-    pub fn cargo_targets(&self) -> Vec<String> {
-        if self.project_type != Some(ProjectType::Rust) {
-            return Vec::new();
-        }
-        // Common cargo subcommands
-        vec![
-            "build", "run", "test", "check", "clippy", "fmt", "doc", "bench",
-            "clean", "update", "publish", "install", "add", "remove",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect()
-    }
+/// Strip control characters from a value before it is rendered into the prompt,
+/// preventing terminal-escape injection from crafted directory names, branch
+/// names (`.git/HEAD`), kubeconfig contexts, or `$VIRTUAL_ENV`.
+pub fn sanitize_label(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).collect()
 }
 
 /// Walk the directory tree once, checking all project markers at each level.
@@ -200,4 +192,30 @@ fn read_npm_scripts(dir: &Path) -> Option<Vec<String>> {
     let json: serde_json::Value = serde_json::from_str(&content).ok()?;
     let scripts = json.get("scripts")?.as_object()?;
     Some(scripts.keys().cloned().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_keeps_normal_labels() {
+        assert_eq!(sanitize_label("main"), "main");
+        assert_eq!(sanitize_label("feature/login"), "feature/login");
+        assert_eq!(sanitize_label("~/projects/oxsh"), "~/projects/oxsh");
+    }
+
+    #[test]
+    fn sanitize_strips_terminal_escape_injection() {
+        // Crafted .git/HEAD branch attempting an OSC title-set + BEL.
+        let evil = "ma\x1b]0;pwned\x07in";
+        let clean = sanitize_label(evil);
+        assert!(!clean.chars().any(|c| c.is_control()));
+        assert_eq!(clean, "ma]0;pwnedin");
+    }
+
+    #[test]
+    fn sanitize_strips_newlines_tabs_and_carriage_returns() {
+        assert_eq!(sanitize_label("a\nb\tc\r"), "abc");
+    }
 }

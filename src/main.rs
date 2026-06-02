@@ -86,8 +86,17 @@ fn main() {
     // Setup history
     let history_path = shellexpand::tilde(&config.history.file).to_string();
     let history =
-        FileBackedHistory::with_file(config.history.max_size, history_path.into())
+        FileBackedHistory::with_file(config.history.max_size, history_path.clone().into())
             .expect("Failed to create history file");
+    // History may contain secrets typed inline — restrict to owner-only.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(
+            &history_path,
+            std::fs::Permissions::from_mode(0o600),
+        );
+    }
 
     // Setup keybindings — support vi_mode from config
     let edit_mode: Box<dyn EditMode> = if config.prompt.vi_mode {

@@ -286,13 +286,6 @@ pub fn expand_globs_respecting_quotes(tokens: &mut Vec<String>, quoted: &[bool])
     *tokens = expanded;
 }
 
-/// Expand glob patterns without quote awareness.
-#[allow(dead_code)]
-pub fn expand_globs(tokens: &mut Vec<String>) {
-    let flags = vec![false; tokens.len()];
-    expand_globs_respecting_quotes(tokens, &flags);
-}
-
 fn contains_glob_chars(s: &str) -> bool {
     s.contains('*') || s.contains('?') || s.contains('[')
 }

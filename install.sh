@@ -11,9 +11,16 @@ fi
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 BINARY_NAME="oxsh"
 
-# Resolve the real (non-root) user when run via sudo
+# Resolve the real (non-root) user's home WITHOUT eval (avoids command injection
+# if SUDO_USER/USER contains shell metacharacters).
 REAL_USER="${SUDO_USER:-$USER}"
-REAL_HOME=$(eval echo "~$REAL_USER")
+if [[ -n "${SUDO_USER:-}" ]]; then
+    REAL_HOME=$(getent passwd "$REAL_USER" 2>/dev/null | cut -d: -f6)
+    [[ -z "$REAL_HOME" ]] && REAL_HOME=$(dscl . -read "/Users/$REAL_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
+    [[ -z "$REAL_HOME" ]] && REAL_HOME="/home/$REAL_USER"
+else
+    REAL_HOME="$HOME"
+fi
 
 # Colors
 bold='\033[1m'

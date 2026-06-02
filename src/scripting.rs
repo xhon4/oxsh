@@ -17,11 +17,6 @@ impl ShellVars {
         self.vars.insert(key.to_string(), val.to_string());
     }
 
-    #[allow(dead_code)]
-    pub fn get(&self, key: &str) -> Option<&str> {
-        self.vars.get(key).map(|s| s.as_str())
-    }
-
     /// Get from shell vars first, then fall back to env
     pub fn resolve(&self, key: &str) -> Option<String> {
         self.vars

@@ -42,7 +42,14 @@ pub fn execute_pipeline(commands: Vec<Command>) -> i32 {
         let is_structured = structured::is_structured_command(&cmd.args[0]);
 
         if is_structured {
-            let input = collect_input(&mut prev, &mut children, &cmd.stdin_redirect);
+            let input = match collect_input(&mut prev, &mut children, &cmd.stdin_redirect) {
+                Ok(s) => s,
+                Err(e) => {
+                    wait_all(&mut children);
+                    eprintln!("oxsh: {e}");
+                    return 1;
+                }
+            };
             let (output, code, is_structured_out) =
                 structured::run_structured(&cmd.args[0], &cmd.args[1..], &input);
 
@@ -299,24 +306,28 @@ fn collect_input(
     prev: &mut PipeState,
     _children: &mut Vec<Child>,
     stdin_redirect: &Option<String>,
-) -> String {
+) -> Result<String, String> {
     match std::mem::replace(prev, PipeState::None) {
-        PipeState::Data(data) => data,
+        PipeState::Data(data) => Ok(data),
         PipeState::Child(mut child) => {
             let mut buf = String::new();
             if let Some(stdout) = child.stdout.as_mut() {
-                stdout.read_to_string(&mut buf).ok();
+                stdout
+                    .read_to_string(&mut buf)
+                    .map_err(|e| format!("pipe read error: {e}"))?;
             }
             child.wait().ok();
-            buf
+            Ok(buf)
         }
         PipeState::None => {
             if let Some(path) = stdin_redirect {
-                std::fs::read_to_string(path).unwrap_or_default()
+                std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))
             } else {
                 let mut buf = String::new();
-                io::stdin().read_to_string(&mut buf).ok();
-                buf
+                io::stdin()
+                    .read_to_string(&mut buf)
+                    .map_err(|e| format!("stdin: {e}"))?;
+                Ok(buf)
             }
         }
     }
