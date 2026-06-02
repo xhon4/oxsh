@@ -20,11 +20,17 @@ indexmap = { version = "2.0", features = ["serde"] }
 nu-ansi-term = "0.50.3"
 reedline = "0.47.0"
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["preserve_order"] }
 shellexpand = "3.1.2"
 strsim = "0.11"
 toml = "1.1.2"
 which = "8.0.2"
+
+[dev-dependencies]
+rstest = "0.23"
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
 
 [profile.release]
 opt-level = 3

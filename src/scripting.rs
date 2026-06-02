@@ -289,3 +289,147 @@ pub struct IfBlock {
     pub then_body: String,
     pub else_body: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rstest::rstest;
+
+    fn expand(input: &str, vars: &ShellVars) -> String {
+        let mut t = vec![input.to_string()];
+        expand_shell_vars(&mut t, vars);
+        t.into_iter().next().unwrap()
+    }
+
+    // ── is_var_assignment ──
+
+    #[rstest]
+    #[case("a=b", Some(("a", "b")))]
+    #[case("a=", Some(("a", "")))]
+    #[case("_x=1", Some(("_x", "1")))]
+    #[case("a==b", Some(("a", "=b")))]
+    #[case("=b", None)]
+    #[case("1a=b", None)]
+    #[case("a.b=c", None)]
+    #[case("echo a=b", None)]
+    fn detects_assignments(#[case] input: &str, #[case] expected: Option<(&str, &str)>) {
+        assert_eq!(is_var_assignment(input), expected);
+    }
+
+    #[test]
+    fn assignment_prefix_captures_rest_as_value() {
+        // The EC-Assign-Cmd bug (VAR=x cmd swallowing the command) lives in
+        // shell.rs execution, not here; this layer correctly returns the prefix.
+        assert_eq!(is_var_assignment("a=b cmd"), Some(("a", "b cmd")));
+    }
+
+    // ── strip_quotes ──
+
+    #[test]
+    fn strips_matching_outer_quotes_only() {
+        assert_eq!(strip_quotes("\"abc\""), "abc");
+        assert_eq!(strip_quotes("'abc'"), "abc");
+        assert_eq!(strip_quotes("abc"), "abc");
+        assert_eq!(strip_quotes("\"abc"), "\"abc"); // unbalanced → unchanged
+        assert_eq!(strip_quotes("\"\""), "");
+    }
+
+    // ── expand_shell_vars ──
+
+    #[test]
+    fn expands_named_and_braced_vars() {
+        let mut v = ShellVars::new();
+        v.set("FOO", "bar");
+        assert_eq!(expand("$FOO", &v), "bar");
+        assert_eq!(expand("${FOO}", &v), "bar");
+        assert_eq!(expand("pre$FOO", &v), "prebar");
+    }
+
+    #[test]
+    fn unset_var_expands_to_empty() {
+        let v = ShellVars::new();
+        assert_eq!(expand("$NOPE", &v), "");
+    }
+
+    #[test]
+    fn expands_exit_code_special() {
+        let mut v = ShellVars::new();
+        v.set("?", "2");
+        assert_eq!(expand("$?", &v), "2");
+    }
+
+    #[test]
+    fn lone_dollar_before_non_name_is_literal() {
+        let v = ShellVars::new();
+        assert_eq!(expand("$.", &v), "$.");
+    }
+
+    #[test]
+    #[ignore = "ISSUE #33 (IN3): $# and ${#} must agree; currently $# -> \"0\" but ${#} -> \"\"."]
+    fn braced_and_unbraced_specials_agree() {
+        let v = ShellVars::new();
+        assert_eq!(expand("$#", &v), expand("${#}", &v));
+    }
+
+    #[test]
+    #[ignore = "ISSUE #30 (V3): ${VAR:-default} parameter expansion not implemented."]
+    fn default_value_parameter_expansion() {
+        let v = ShellVars::new();
+        assert_eq!(expand("${NOPE:-fallback}", &v), "fallback");
+    }
+
+    // ── control-flow parsers ──
+
+    #[test]
+    fn parses_for_loop() {
+        let f = parse_for_loop("for i in 1 2 3; do echo $i; done").unwrap();
+        assert_eq!(f.var, "i");
+        assert_eq!(f.items, ["1", "2", "3"]);
+        assert_eq!(f.body, "echo $i");
+    }
+
+    #[test]
+    fn for_loop_accepts_bare_do_and_done() {
+        let f = parse_for_loop("for i in a b do echo $i done").unwrap();
+        assert_eq!(f.items, ["a", "b"]);
+        assert_eq!(f.body, "echo $i");
+    }
+
+    #[test]
+    fn non_for_input_returns_none() {
+        assert!(parse_for_loop("for x in").is_none());
+        assert!(parse_for_loop("forx in 1; do y; done").is_none());
+    }
+
+    #[test]
+    fn parses_while_loop() {
+        let w = parse_while_loop("while test; do echo; done").unwrap();
+        assert_eq!(w.condition, "test");
+        assert_eq!(w.body, "echo");
+    }
+
+    #[test]
+    fn parses_if_with_and_without_else() {
+        let a = parse_if("if c; then x; fi").unwrap();
+        assert_eq!(a.condition, "c");
+        assert_eq!(a.then_body, "x");
+        assert!(a.else_body.is_none());
+
+        let b = parse_if("if c; then x; else y; fi").unwrap();
+        assert_eq!(b.else_body.as_deref(), Some("y"));
+    }
+
+    #[test]
+    #[ignore = "ISSUE #35 (EC-Quote): for items should respect quotes; \
+                'for f in \"a b\" c' must yield items [\"a b\", \"c\"]."]
+    fn for_items_respect_quotes() {
+        let f = parse_for_loop("for f in \"a b\" c; do echo; done").unwrap();
+        assert_eq!(f.items, ["a b", "c"]);
+    }
+
+    #[test]
+    #[ignore = "ISSUE #34 (IN1): if should accept ' then ' like for/while accept ' do '."]
+    fn if_accepts_bare_then() {
+        assert!(parse_if("if c then x fi").is_some());
+    }
+}

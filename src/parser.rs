@@ -507,3 +507,173 @@ fn run_subshell(cmd: &str) -> String {
         Err(_) => String::new(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tok(input: &str) -> (Vec<String>, Vec<bool>) {
+        tokenize_with_quote_flags(input)
+    }
+
+    fn brace(input: &str) -> Vec<String> {
+        let mut t = vec![input.to_string()];
+        expand_braces(&mut t);
+        t
+    }
+
+    // ── tokenize_with_quote_flags ──
+
+    #[test]
+    fn splits_plain_words() {
+        let (t, q) = tok("a b c");
+        assert_eq!(t, ["a", "b", "c"]);
+        assert_eq!(q, [false, false, false]);
+    }
+
+    #[test]
+    fn keeps_double_quoted_spaces_and_flags_quoted() {
+        let (t, q) = tok("\"a b\" c");
+        assert_eq!(t, ["a b", "c"]);
+        assert_eq!(q, [true, false]);
+    }
+
+    #[test]
+    fn single_quotes_are_literal() {
+        let (t, q) = tok("'a b'");
+        assert_eq!(t, ["a b"]);
+        assert_eq!(q, [true]);
+    }
+
+    #[test]
+    fn concatenates_adjacent_quoted_and_unquoted() {
+        let (t, q) = tok("a\"b\"c");
+        assert_eq!(t, ["abc"]);
+        assert_eq!(q, [false]); // mixed → not fully quoted
+    }
+
+    #[test]
+    fn empty_quotes_produce_empty_token() {
+        let (t, q) = tok("\"\"");
+        assert_eq!(t, [""]);
+        assert_eq!(q, [true]);
+    }
+
+    #[test]
+    fn backslash_escapes_space_outside_quotes() {
+        let (t, _) = tok("a\\ b");
+        assert_eq!(t, ["a b"]);
+    }
+
+    #[test]
+    fn double_quote_char_is_literal_inside_single_quotes() {
+        let (t, _) = tok("'\"'");
+        assert_eq!(t, ["\""]);
+    }
+
+    #[test]
+    #[ignore = "ISSUE #24 (E1): inside double quotes a backslash should be literal \
+                unless before $ ` \" \\; currently it escapes the next char and is dropped."]
+    fn backslash_literal_in_double_quotes() {
+        let (t, _) = tok("\"a\\nb\"");
+        assert_eq!(t, ["a\\nb"]); // currently produces "anb"
+    }
+
+    // ── expand_braces ──
+
+    #[test]
+    fn brace_comma_expansion() {
+        assert_eq!(brace("{a,b,c}"), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn brace_prefix_suffix_applied() {
+        assert_eq!(brace("pre{a,b}post"), ["preapost", "prebpost"]);
+    }
+
+    #[test]
+    fn brace_numeric_range_both_directions() {
+        assert_eq!(brace("{1..4}"), ["1", "2", "3", "4"]);
+        assert_eq!(brace("{4..1}"), ["4", "3", "2", "1"]);
+    }
+
+    #[test]
+    fn brace_char_range() {
+        assert_eq!(brace("{a..d}"), ["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn brace_nested() {
+        assert_eq!(brace("{a,b{c,d}}"), ["a", "bc", "bd"]);
+    }
+
+    #[test]
+    fn brace_non_expression_is_literal() {
+        assert_eq!(brace("{a}"), ["{a}"]);
+    }
+
+    #[test]
+    #[ignore = "ISSUE #50 (G4): stepped ranges {1..N..step} are unsupported (returned literal)."]
+    fn brace_stepped_range() {
+        assert_eq!(brace("{1..10..2}"), ["1", "3", "5", "7", "9"]);
+    }
+
+    #[test]
+    #[ignore = "ISSUE #50 (G4): zero-padded ranges {01..03} lose their padding."]
+    fn brace_zero_padded_range() {
+        assert_eq!(brace("{01..03}"), ["01", "02", "03"]);
+    }
+
+    // ── extract_redirects (private) ──
+
+    #[test]
+    fn extracts_stdout_truncate_and_strips_redirect_tokens() {
+        let mut t = vec!["echo".into(), "hi".into(), ">".into(), "f".into()];
+        let (stdin, stdout, stderr, merge) = extract_redirects(&mut t);
+        assert_eq!(t, ["echo", "hi"]);
+        assert!(matches!(stdout, Some(Redirect::Truncate(ref p)) if p == "f"));
+        assert!(stdin.is_none() && stderr.is_none() && !merge);
+    }
+
+    #[test]
+    fn extracts_append_and_merge() {
+        let mut t = vec![">>".into(), "out".into()];
+        let (_, stdout, _, _) = extract_redirects(&mut t);
+        assert!(matches!(stdout, Some(Redirect::Append(_))));
+
+        let mut t2 = vec!["cmd".into(), "2>&1".into()];
+        let (_, _, _, merge) = extract_redirects(&mut t2);
+        assert!(merge);
+        assert_eq!(t2, ["cmd"]);
+    }
+
+    // ── resolve_alias ──
+
+    fn aliases(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn resolves_simple_alias_with_args() {
+        let a = aliases(&[("g", "git")]);
+        let mut t = vec!["g".into(), "status".into()];
+        resolve_alias(&mut t, &a);
+        assert_eq!(t, ["git", "status"]);
+    }
+
+    #[test]
+    fn self_referencing_alias_does_not_hang() {
+        let a = aliases(&[("ls", "ls --color")]);
+        let mut t = vec!["ls".into(), "-a".into()];
+        resolve_alias(&mut t, &a);
+        assert_eq!(t, ["ls", "--color", "-a"]);
+    }
+
+    #[test]
+    fn mutual_alias_recursion_is_bounded() {
+        let a = aliases(&[("x", "y"), ("y", "x")]);
+        let mut t = vec!["x".into()];
+        resolve_alias(&mut t, &a); // must terminate via depth limit, no hang
+        assert!(!t.is_empty());
+    }
+}
