@@ -112,3 +112,45 @@ fn control_flow_followed_by_chain_operator() {
         .success()
         .stdout(predicate::str::contains("ok"));
 }
+
+// ── Wave 3 regressions ──
+
+#[test]
+fn explain_does_not_execute_external_commands() {
+    // `?? cmd` must resolve the command, not run it.
+    oxsh()
+        .args(["-c", "?? ls"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("for usage"));
+}
+
+#[test]
+fn explain_identifies_builtins() {
+    oxsh()
+        .args(["-c", "?? echo"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("builtin"));
+}
+
+#[test]
+fn trailing_pipe_exits_cleanly() {
+    // Empty trailing stage must not hang or leave the upstream child unwaited.
+    oxsh().args(["-c", "echo hi |"]).assert().success();
+}
+
+#[test]
+fn variable_values_are_not_expanded_twice() {
+    // $FOO resolves to the literal "$BAR"; that result must NOT be expanded again.
+    oxsh()
+        .args(["-c", "echo $FOO"])
+        .env("FOO", "$BAR")
+        .env("BAR", "should-not-appear")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("$BAR")
+                .and(predicate::str::contains("should-not-appear").not()),
+        );
+}

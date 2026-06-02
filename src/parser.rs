@@ -66,13 +66,16 @@ pub fn tokenize_with_quote_flags(input: &str) -> (Vec<String>, Vec<bool>) {
     (tokens, quoted_flags)
 }
 
-/// Expand ~ and $ENV_VAR in tokens
+/// Expand a leading `~` to the home directory.
+///
+/// `$VAR`/`${VAR}` (including environment variables, via the env fallback) are
+/// already expanded upstream by `scripting::expand_shell_vars`; expanding them
+/// again here re-expanded any value that happened to contain a `$`.
 pub fn expand_vars(tokens: &mut Vec<String>) {
     for token in tokens.iter_mut() {
         if token.starts_with('~') {
             *token = shellexpand::tilde(token).to_string();
         }
-        *token = shellexpand::env(token).unwrap_or_else(|_| token.clone().into()).to_string();
     }
 }
 
@@ -407,66 +410,88 @@ fn try_range_expand(inner: &str) -> Option<Vec<String>> {
 }
 
 /// Expand `$(command)` and backtick substitutions in a string.
+///
+/// Operates on `char`s (UTF-8 safe) and tracks both single- and double-quote
+/// context so that an apostrophe inside double quotes does not wrongly disable
+/// expansion. Escaped characters inside `$(...)` are skipped, not counted toward
+/// the parenthesis depth.
 pub fn expand_subshells(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
     let mut result = String::with_capacity(input.len());
-    let bytes = input.as_bytes();
     let mut i = 0;
     let mut in_single = false;
+    let mut in_double = false;
 
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\'' => {
+    while i < chars.len() {
+        match chars[i] {
+            '\'' if !in_double => {
                 in_single = !in_single;
                 result.push('\'');
                 i += 1;
             }
-            b'$' if !in_single && i + 1 < bytes.len() && bytes[i + 1] == b'(' => {
-                i += 2; // skip $(
+            '"' if !in_single => {
+                in_double = !in_double;
+                result.push('"');
+                i += 1;
+            }
+            '$' if !in_single && i + 1 < chars.len() && chars[i + 1] == '(' => {
+                i += 2; // skip "$("
                 let start = i;
                 let mut depth = 1;
                 let mut sq = false;
                 let mut dq = false;
-                while i < bytes.len() && depth > 0 {
-                    match bytes[i] {
-                        b'\'' if !dq => sq = !sq,
-                        b'"' if !sq => dq = !dq,
-                        b'(' if !sq && !dq => depth += 1,
-                        b')' if !sq && !dq => depth -= 1,
+                while i < chars.len() && depth > 0 {
+                    match chars[i] {
+                        '\\' if !sq => {
+                            // Escaped char: skip it and the next, don't count parens.
+                            i += 1;
+                            if i < chars.len() {
+                                i += 1;
+                            }
+                            continue;
+                        }
+                        '\'' if !dq => sq = !sq,
+                        '"' if !sq => dq = !dq,
+                        '(' if !sq && !dq => depth += 1,
+                        ')' if !sq && !dq => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
                         _ => {}
                     }
-                    if depth > 0 {
-                        i += 1;
-                    }
+                    i += 1;
                 }
-                let cmd = &input[start..i];
-                if i < bytes.len() {
-                    i += 1; // skip closing )
+                let cmd: String = chars[start..i].iter().collect();
+                if i < chars.len() {
+                    i += 1; // skip closing ')'
                 }
-                result.push_str(&run_subshell(cmd));
+                result.push_str(&run_subshell(&cmd));
             }
-            b'`' if !in_single => {
+            '`' if !in_single => {
                 i += 1;
                 let start = i;
-                while i < bytes.len() && bytes[i] != b'`' {
+                while i < chars.len() && chars[i] != '`' {
                     i += 1;
                 }
-                let cmd = &input[start..i];
-                if i < bytes.len() {
-                    i += 1;
+                let cmd: String = chars[start..i].iter().collect();
+                if i < chars.len() {
+                    i += 1; // skip closing backtick
                 }
-                result.push_str(&run_subshell(cmd));
+                result.push_str(&run_subshell(&cmd));
             }
-            b'\\' if !in_single => {
-                // Preserve the escape so the tokenizer downstream handles it correctly
+            '\\' if !in_single => {
+                // Preserve the escape so the downstream tokenizer handles it.
                 result.push('\\');
                 i += 1;
-                if i < bytes.len() {
-                    result.push(bytes[i] as char);
+                if i < chars.len() {
+                    result.push(chars[i]);
                     i += 1;
                 }
             }
-            _ => {
-                result.push(bytes[i] as char);
+            c => {
+                result.push(c);
                 i += 1;
             }
         }
@@ -664,5 +689,29 @@ mod tests {
         let mut t = vec!["x".into()];
         resolve_alias(&mut t, &a); // must terminate via depth limit, no hang
         assert!(!t.is_empty());
+    }
+
+    // ── expand_subshells ──
+
+    #[test]
+    fn subshell_passthrough_preserves_utf8() {
+        // No substitution present — input is returned unchanged, including
+        // multi-byte UTF-8 (regression for the byte-cast corruption, S2).
+        assert_eq!(expand_subshells("café ☃ 你好"), "café ☃ 你好");
+    }
+
+    #[test]
+    fn subshell_in_single_quotes_is_not_expanded() {
+        // Single quotes protect $(...) — and this needs no command execution.
+        assert_eq!(expand_subshells("'$(echo x)'"), "'$(echo x)'");
+    }
+
+    #[test]
+    fn apostrophe_in_double_quotes_does_not_disable_expansion() {
+        // Q3: an apostrophe inside double quotes must not flip into single-quote
+        // mode and suppress the following $(...). Robust to whatever $SHELL emits:
+        // the `$(` must be gone because the substitution was performed.
+        let out = expand_subshells("\"a's $(echo X)\"");
+        assert!(!out.contains("$("), "subshell not expanded: {out}");
     }
 }

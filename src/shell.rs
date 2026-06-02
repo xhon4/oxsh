@@ -658,29 +658,12 @@ fn explain_command(cmd: &str) {
         print!("{usage}");
         return;
     }
-    let help = std::process::Command::new(cmd)
-        .arg("--help")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output();
-
-    match help {
-        Ok(output) => {
-            let text = if !output.stdout.is_empty() {
-                String::from_utf8_lossy(&output.stdout).to_string()
-            } else {
-                String::from_utf8_lossy(&output.stderr).to_string()
-            };
-            let lines: Vec<&str> = text.lines().take(30).collect();
-            println!("\x1b[1m{cmd} --help\x1b[0m");
-            for line in &lines {
-                println!("{line}");
-            }
-            if text.lines().count() > 30 {
-                println!(
-                    "\x1b[2m... (truncated, run '{cmd} --help' for full output)\x1b[0m"
-                );
-            }
+    // Do NOT execute the command — `?? cmd` must be side-effect free. Resolve
+    // where it lives and point the user at its own help/man instead of running it.
+    match which::which(cmd) {
+        Ok(path) => {
+            println!("\x1b[1m{cmd}\x1b[0m is {}", path.display());
+            println!("\x1b[2mrun '{cmd} --help' or 'man {cmd}' for usage\x1b[0m");
         }
         Err(_) => {
             eprintln!("oxsh: {cmd}: command not found");

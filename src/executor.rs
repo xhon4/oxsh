@@ -35,6 +35,13 @@ pub fn execute_pipeline(commands: Vec<Command>) -> i32 {
 
     for (i, cmd) in commands.iter().enumerate() {
         if cmd.args.is_empty() {
+            // Reap any pending upstream child so an empty stage (e.g. a trailing
+            // pipe) does not leak it as a zombie.
+            if let PipeState::Child(mut child) =
+                std::mem::replace(&mut prev, PipeState::None)
+            {
+                child.wait().ok();
+            }
             continue;
         }
 
