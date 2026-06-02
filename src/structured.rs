@@ -182,30 +182,35 @@ fn cmd_sort_by(args: &[String], input: &str) -> (String, i32, bool) {
     let val = parse_input(input);
 
     match val {
-        Value::List(mut items) => {
-            items.sort_by(|a, b| {
-                let va = a.get_field(field);
-                let vb = b.get_field(field);
-                let cmp = match (
-                    va.and_then(|v| v.as_number()),
-                    vb.and_then(|v| v.as_number()),
-                ) {
-                    (Some(na), Some(nb)) => {
-                        na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal)
+        Value::List(items) => {
+            // Decorate each item with its sort key once, then sort — avoids
+            // recomputing get_field + as_str_lossy on every comparison.
+            struct Key {
+                num: Option<f64>,
+                text: String,
+            }
+            let mut decorated: Vec<(Key, Value)> = items
+                .into_iter()
+                .map(|item| {
+                    let fv = item.get_field(field);
+                    let key = Key {
+                        num: fv.and_then(|v| v.as_number()),
+                        text: fv.map(|v| v.as_str_lossy()).unwrap_or_default(),
+                    };
+                    (key, item)
+                })
+                .collect();
+            decorated.sort_by(|(a, _), (b, _)| {
+                let cmp = match (a.num, b.num) {
+                    (Some(x), Some(y)) => {
+                        x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal)
                     }
-                    _ => {
-                        let sa = va.map(|v| v.as_str_lossy()).unwrap_or_default();
-                        let sb = vb.map(|v| v.as_str_lossy()).unwrap_or_default();
-                        sa.cmp(&sb)
-                    }
+                    _ => a.text.cmp(&b.text),
                 };
-                if desc {
-                    cmp.reverse()
-                } else {
-                    cmp
-                }
+                if desc { cmp.reverse() } else { cmp }
             });
-            (Value::List(items).to_json() + "\n", 0, true)
+            let sorted: Vec<Value> = decorated.into_iter().map(|(_, v)| v).collect();
+            (Value::List(sorted).to_json() + "\n", 0, true)
         }
         _ => (val.to_json() + "\n", 0, true),
     }
@@ -314,5 +319,49 @@ fn cmd_flatten(input: &str) -> (String, i32, bool) {
             (Value::List(flat).to_json() + "\n", 0, true)
         }
         _ => (val.to_json() + "\n", 0, true),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(cmd: &str, args: &[&str], input: &str) -> String {
+        let a: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let (out, code, _) = run_structured(cmd, &a, input);
+        assert_eq!(code, 0, "command exited non-zero: {out}");
+        out.trim().to_string()
+    }
+
+    #[test]
+    fn sort_by_orders_numeric_field_ascending() {
+        let out = run("sort-by", &["n"], r#"[{"n":3},{"n":1},{"n":2}]"#);
+        assert_eq!(out, r#"[{"n":1},{"n":2},{"n":3}]"#);
+    }
+
+    #[test]
+    fn sort_by_desc_reverses() {
+        let out = run("sort-by", &["n", "--desc"], r#"[{"n":1},{"n":3},{"n":2}]"#);
+        assert_eq!(out, r#"[{"n":3},{"n":2},{"n":1}]"#);
+    }
+
+    #[test]
+    fn sort_by_strings_lexically() {
+        let out = run("sort-by", &["s"], r#"[{"s":"c"},{"s":"a"},{"s":"b"}]"#);
+        assert_eq!(out, r#"[{"s":"a"},{"s":"b"},{"s":"c"}]"#);
+    }
+
+    #[test]
+    fn sort_by_missing_field_stays_valid_json() {
+        let out = run("sort-by", &["n"], r#"[{"n":2},{"x":9},{"n":1}]"#);
+        assert!(out.starts_with('[') && out.ends_with(']'));
+    }
+
+    #[test]
+    fn where_then_select_compose() {
+        let input = r#"[{"name":"a","cpu":5},{"name":"b","cpu":15}]"#;
+        let filtered = run("where", &["cpu", ">", "10"], input);
+        let projected = run("select", &["name"], &filtered);
+        assert_eq!(projected, r#"[{"name":"b"}]"#);
     }
 }

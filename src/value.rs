@@ -75,19 +75,15 @@ impl Value {
 
     /// Get a nested field via dot notation: "status.phase"
     pub fn get_field(&self, path: &str) -> Option<&Value> {
-        let parts: Vec<&str> = path.split('.').collect();
         let mut current = self;
-        for part in parts {
+        for part in path.split('.') {
             match current {
                 Value::Record(map) => {
                     current = map.get(part)?;
                 }
                 Value::List(items) => {
-                    if let Ok(idx) = part.parse::<usize>() {
-                        current = items.get(idx)?;
-                    } else {
-                        return None;
-                    }
+                    let idx = part.parse::<usize>().ok()?;
+                    current = items.get(idx)?;
                 }
                 _ => return None,
             }
@@ -353,6 +349,8 @@ mod tests {
         let val = Value::from_json(r#"{"a":1}"#).unwrap();
         assert_eq!(val.get_field("b"), None);
         assert_eq!(val.get_field("a.b"), None); // scalar has no fields
+        // non-numeric index into a list yields None
+        assert_eq!(Value::from_json("[1,2]").unwrap().get_field("x"), None);
     }
 
     // ── as_number / as_str_lossy ──

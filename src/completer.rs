@@ -6,6 +6,9 @@ use crate::context::ShellContext;
 pub struct OxshCompleter {
     commands: Vec<String>,
     matcher: SkimMatcherV2,
+    /// Project/env context cached by CWD — avoids re-reading .git/HEAD,
+    /// package.json, kubeconfig, etc. on every Tab in the same directory.
+    context_cache: Option<(std::path::PathBuf, ShellContext)>,
 }
 
 impl OxshCompleter {
@@ -13,7 +16,21 @@ impl OxshCompleter {
         Self {
             commands,
             matcher: SkimMatcherV2::default(),
+            context_cache: None,
         }
+    }
+
+    /// Return the current context, re-detecting only when the CWD changed.
+    fn cached_context(&mut self) -> ShellContext {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        if let Some((cached_cwd, ctx)) = &self.context_cache {
+            if *cached_cwd == cwd {
+                return ctx.clone();
+            }
+        }
+        let ctx = ShellContext::detect();
+        self.context_cache = Some((cwd, ctx.clone()));
+        ctx
     }
 }
 
@@ -188,7 +205,7 @@ impl Completer for OxshCompleter {
 
             // Dynamic context-aware: `npm run <script>`, `cargo test <target>`
             if words.len() == 2 {
-                let ctx = ShellContext::detect();
+                let ctx = self.cached_context();
                 if let Some(suggestions) =
                     complete_dynamic_subcommands(first_word, words[1], partial, span, &self.matcher, &ctx)
                 {

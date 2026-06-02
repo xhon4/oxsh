@@ -15,19 +15,19 @@ fn suggest_correction(cmd: &str, known_commands: &[String]) -> Option<String> {
     }
 
     let threshold = if cmd.len() <= 3 { 1 } else { 2 };
-    let mut best: Option<(String, usize)> = None;
+    let mut best: Option<(&str, usize)> = None;
 
+    // Iterate by reference — no per-candidate allocation; only the winner is owned.
     let all = builtins::BUILTIN_NAMES
         .iter()
-        .map(|s| *s)
-        .chain(structured::STRUCTURED_COMMANDS.iter().map(|s| *s))
-        .map(|s| s.to_string())
-        .chain(known_commands.iter().cloned());
+        .copied()
+        .chain(structured::STRUCTURED_COMMANDS.iter().copied())
+        .chain(known_commands.iter().map(|s| s.as_str()));
 
     for name in all {
-        let dist = strsim::damerau_levenshtein(cmd, &name);
+        let dist = strsim::damerau_levenshtein(cmd, name);
         if dist > 0 && dist <= threshold {
-            let is_better = best.as_ref().map_or(true, |(_, d)| dist < *d);
+            let is_better = best.map_or(true, |(_, d)| dist < d);
             if is_better {
                 let stop_early = dist == 1;
                 best = Some((name, dist));
@@ -38,7 +38,7 @@ fn suggest_correction(cmd: &str, known_commands: &[String]) -> Option<String> {
         }
     }
 
-    best.map(|(name, _)| name)
+    best.map(|(name, _)| name.to_string())
 }
 
 pub struct Shell {
@@ -783,4 +783,40 @@ fn split_chain_ops(input: &str) -> Vec<(&str, ChainOp)> {
     }
     segments.push((&input[start..], ChainOp::None));
     segments
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suggests_close_builtin() {
+        assert_eq!(suggest_correction("ehco", &[]), Some("echo".to_string()));
+    }
+
+    #[test]
+    fn suggests_from_known_commands() {
+        let known = vec!["git".to_string()];
+        assert_eq!(suggest_correction("gti", &known), Some("git".to_string()));
+    }
+
+    #[test]
+    fn no_suggestion_when_too_far() {
+        assert_eq!(suggest_correction("xyzzyq", &[]), None);
+    }
+
+    #[test]
+    fn no_suggestion_for_short_or_path_like() {
+        assert_eq!(suggest_correction("a", &[]), None);
+        assert_eq!(suggest_correction("./foo", &[]), None);
+    }
+
+    #[test]
+    fn detects_control_flow_starts() {
+        assert!(is_control_flow_start("for i in 1; do x; done"));
+        assert!(is_control_flow_start("  while true do x done"));
+        assert!(is_control_flow_start("if a; then b; fi"));
+        assert!(!is_control_flow_start("forge build"));
+        assert!(!is_control_flow_start("echo for"));
+    }
 }

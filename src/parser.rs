@@ -91,18 +91,14 @@ fn resolve_alias_depth(
         return;
     }
     if let Some(expansion) = aliases.get(&tokens[0]) {
-        let first_expanded = tokenize(expansion).into_iter().next();
-        // Break self-reference (e.g. `alias ls='ls --color'`)
-        if first_expanded.as_deref() == Some(tokens[0].as_str()) {
-            let mut expanded = tokenize(expansion);
-            expanded.extend(tokens.drain(1..));
-            *tokens = expanded;
-            return;
-        }
         let mut expanded = tokenize(expansion);
+        // Break self-reference (e.g. `alias ls='ls --color'`): expand once, don't recurse.
+        let is_self_ref = expanded.first().map(|s| s.as_str()) == Some(tokens[0].as_str());
         expanded.extend(tokens.drain(1..));
         *tokens = expanded;
-        resolve_alias_depth(tokens, aliases, depth + 1);
+        if !is_self_ref {
+            resolve_alias_depth(tokens, aliases, depth + 1);
+        }
     }
 }
 
