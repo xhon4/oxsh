@@ -67,15 +67,48 @@ fn for_loop_without_semicolons_works() {
         .stdout(predicate::str::contains("1").and(predicate::str::contains("3")));
 }
 
+// ── Semicolon control-flow syntax (relates to #19) ──
+// split_chain_ops must not shred the ';' inside `; do`/`; then`/`; done`.
+
 #[test]
-#[ignore = "ISSUE (new, relates to #19): semicolon control-flow syntax is broken — \
-            split_chain_ops splits on the ';' in '; do'/'; then'/'; done' before the \
-            control-flow parser sees it, so `for i in 1 2 3; do echo $i; done` errors \
-            with 'for: No such file or directory'. Fix when unifying control-flow execution."]
 fn semicolon_for_loop_syntax_works() {
     oxsh()
         .args(["-c", "for i in 1 2 3; do echo $i; done"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("1"));
+        .stdout(
+            predicate::str::contains("1")
+                .and(predicate::str::contains("2"))
+                .and(predicate::str::contains("3")),
+        );
+}
+
+#[test]
+fn semicolon_if_then_runs_then_branch() {
+    oxsh()
+        .args(["-c", "if true; then echo yes; fi"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("yes"));
+}
+
+#[test]
+fn semicolon_if_else_runs_else_branch() {
+    oxsh()
+        .args(["-c", "if false; then echo a; else echo b; fi"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("b").and(predicate::str::contains("a").not()));
+}
+
+#[test]
+#[ignore = "Known limitation (#19): a control-flow statement followed by a chain \
+            operator (e.g. `for ... done && echo ok`) is treated as a single statement, \
+            so the trailing chain is not honored. Needs control-flow-aware segmentation."]
+fn control_flow_followed_by_chain_operator() {
+    oxsh()
+        .args(["-c", "for i in 1 do echo $i done && echo ok"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ok"));
 }

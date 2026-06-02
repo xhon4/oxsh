@@ -216,7 +216,14 @@ impl Shell {
         }
 
         let start = Instant::now();
-        let chain_segments = split_chain_ops(input);
+        // Control-flow statements use ';' as syntax (`; do`/`; then`/`; done`),
+        // which must not be treated as chain separators. Hand the whole statement
+        // to the control-flow parsers instead of splitting it on operators.
+        let chain_segments = if is_control_flow_start(input) {
+            vec![(input, ChainOp::None)]
+        } else {
+            split_chain_ops(input)
+        };
 
         for (segment, op) in chain_segments {
             let segment = segment.trim();
@@ -714,6 +721,14 @@ fn should_skip(op: ChainOp, exit_code: i32) -> bool {
         ChainOp::Or => exit_code == 0,
         ChainOp::Semicolon | ChainOp::None => false,
     }
+}
+
+/// True if the input begins a single-line control-flow statement, whose internal
+/// `;` separators are part of the statement (`; do`/`; then`/`; done`) and must
+/// not be split as chain operators.
+fn is_control_flow_start(input: &str) -> bool {
+    let t = input.trim_start();
+    t.starts_with("for ") || t.starts_with("while ") || t.starts_with("if ")
 }
 
 /// Split input on unquoted `&&`, `||`, `;` chain operators.
