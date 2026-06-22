@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
+#[derive(Default)]
 pub struct Config {
     pub shell: ShellConfig,
     pub prompt: PromptConfig,
@@ -39,24 +40,12 @@ pub struct HistoryConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
+#[derive(Default)]
 pub struct PathConfig {
     pub prepend: Vec<String>,
     pub scan_dirs: Vec<String>,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            shell: ShellConfig::default(),
-            prompt: PromptConfig::default(),
-            history: HistoryConfig::default(),
-            aliases: HashMap::new(),
-            env: HashMap::new(),
-            path: PathConfig::default(),
-            on_startup: Vec::new(),
-        }
-    }
-}
 
 impl Default for ShellConfig {
     fn default() -> Self {
@@ -87,14 +76,6 @@ impl Default for HistoryConfig {
     }
 }
 
-impl Default for PathConfig {
-    fn default() -> Self {
-        Self {
-            prepend: Vec::new(),
-            scan_dirs: Vec::new(),
-        }
-    }
-}
 
 impl Config {
     pub fn load() -> Self {
@@ -178,14 +159,12 @@ pub fn generate_default_config(force: bool) -> Option<PathBuf> {
     }
 
     // Ensure parent directory exists
-    if let Some(parent) = path.parent() {
-        if !parent.exists() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
+    if let Some(parent) = path.parent()
+        && !parent.exists()
+            && let Err(e) = std::fs::create_dir_all(parent) {
                 eprintln!("oxsh: cannot create {}: {e}", parent.display());
                 return None;
             }
-        }
-    }
 
     let content = default_config_content();
     match std::fs::write(&path, content) {
@@ -227,14 +206,13 @@ fn config_file_path() -> PathBuf {
     }
 
     // Windows primary: %APPDATA%\oxsh\config.toml
-    if cfg!(windows) {
-        if let Some(config_dir) = dirs_next::config_dir() {
+    if cfg!(windows)
+        && let Some(config_dir) = dirs_next::config_dir() {
             let win_config = config_dir.join("oxsh").join("config.toml");
             if win_config.exists() {
                 return win_config;
             }
         }
-    }
 
     // Fallback: ~/.config/oxsh/config.toml (legacy)
     if let Some(config_dir) = dirs_next::config_dir() {

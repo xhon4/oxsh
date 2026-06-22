@@ -217,11 +217,10 @@ fn collect_path_commands(aliases: &HashMap<String, String>) -> Vec<String> {
             for entry in entries.flatten() {
                 // Just take the name — skip file_type() which triggers lstat() per file.
                 // Directories in PATH are rare and harmless as completion candidates.
-                if let Some(name) = entry.file_name().to_str() {
-                    if !name.starts_with('.') {
+                if let Some(name) = entry.file_name().to_str()
+                    && !name.starts_with('.') {
                         commands.push(name.to_string());
                     }
-                }
             }
         }
     }

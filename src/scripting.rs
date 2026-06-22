@@ -81,7 +81,7 @@ pub fn strip_quotes(val: &str) -> &str {
 ///   $*  all positional parameters as single word (same as $@)
 ///   $!  last background process PID (stored in shell var "!")
 ///   $1..$9  positional parameters
-pub fn expand_shell_vars(tokens: &mut Vec<String>, vars: &ShellVars) {
+pub fn expand_shell_vars(tokens: &mut [String], vars: &ShellVars) {
     for token in tokens.iter_mut() {
         if !token.contains('$') {
             continue;

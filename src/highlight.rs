@@ -58,7 +58,7 @@ impl Highlighter for OxshHighlighter {
 impl OxshHighlighter {
     fn highlight_pipeline(&self, styled: &mut StyledText, line: &str) {
         let segments = split_pipe_segments(line);
-        for (_i, (segment, separator)) in segments.iter().enumerate() {
+        for (segment, separator) in segments.iter() {
             // Skip leading whitespace, but preserve it
             let trimmed_start = segment.len() - segment.trim_start().len();
             if trimmed_start > 0 {

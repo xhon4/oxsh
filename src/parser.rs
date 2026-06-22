@@ -71,7 +71,7 @@ pub fn tokenize_with_quote_flags(input: &str) -> (Vec<String>, Vec<bool>) {
 /// `$VAR`/`${VAR}` (including environment variables, via the env fallback) are
 /// already expanded upstream by `scripting::expand_shell_vars`; expanding them
 /// again here re-expanded any value that happened to contain a `$`.
-pub fn expand_vars(tokens: &mut Vec<String>) {
+pub fn expand_vars(tokens: &mut [String]) {
     for token in tokens.iter_mut() {
         if token.starts_with('~') {
             *token = shellexpand::tilde(token).to_string();
@@ -128,8 +128,8 @@ pub enum Redirect {
 pub fn parse_pipeline_from_tokens(token_groups: Vec<Vec<String>>) -> Vec<Command> {
     token_groups
         .into_iter()
-        .enumerate()
-        .map(|(_, mut tokens)| {
+        
+        .map(|mut tokens| {
             let background = tokens.last().map(|t| t == "&").unwrap_or(false);
             if background {
                 tokens.pop();

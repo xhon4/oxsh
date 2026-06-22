@@ -23,11 +23,10 @@ impl OxshCompleter {
     /// Return the current context, re-detecting only when the CWD changed.
     fn cached_context(&mut self) -> ShellContext {
         let cwd = std::env::current_dir().unwrap_or_default();
-        if let Some((cached_cwd, ctx)) = &self.context_cache {
-            if *cached_cwd == cwd {
+        if let Some((cached_cwd, ctx)) = &self.context_cache
+            && *cached_cwd == cwd {
                 return ctx.clone();
             }
-        }
         let ctx = ShellContext::detect();
         self.context_cache = Some((cwd, ctx.clone()));
         ctx
@@ -193,26 +192,21 @@ impl Completer for OxshCompleter {
             }
 
             // Subcommand completion for known tools (only after the base command)
-            if words.len() == 1 {
-                if let Some(suggestions) =
+            if words.len() == 1
+                && let Some(suggestions) =
                     complete_subcommands(first_word, partial, span, &self.matcher)
-                {
-                    if !suggestions.is_empty() {
+                    && !suggestions.is_empty() {
                         return suggestions;
                     }
-                }
-            }
 
             // Dynamic context-aware: `npm run <script>`, `cargo test <target>`
             if words.len() == 2 {
                 let ctx = self.cached_context();
                 if let Some(suggestions) =
                     complete_dynamic_subcommands(first_word, words[1], partial, span, &self.matcher, &ctx)
-                {
-                    if !suggestions.is_empty() {
+                    && !suggestions.is_empty() {
                         return suggestions;
                     }
-                }
             }
 
             complete_paths(partial, span, false)
@@ -396,13 +390,11 @@ fn read_cargo_targets(subcmd: &str) -> Vec<String> {
         }
     }
     // Also add the package name for `cargo run`
-    if subcmd == "run" {
-        if let Some(pkg) = table.get("package").and_then(|v| v.get("name")).and_then(|v| v.as_str()) {
-            if !names.contains(&pkg.to_string()) {
+    if subcmd == "run"
+        && let Some(pkg) = table.get("package").and_then(|v| v.get("name")).and_then(|v| v.as_str())
+            && !names.contains(&pkg.to_string()) {
                 names.push(pkg.to_string());
             }
-        }
-    }
     names
 }
 

@@ -21,11 +21,10 @@ fn cached_hostname() -> &'static str {
             }
         }
         // 2. $HOSTNAME (bash sets this; also works on many systems)
-        if let Ok(h) = env::var("HOSTNAME") {
-            if !h.is_empty() {
+        if let Ok(h) = env::var("HOSTNAME")
+            && !h.is_empty() {
                 return h;
             }
-        }
         // 3. `hostname` command (macOS, BSD, Alpine, etc.)
         if let Ok(out) = std::process::Command::new("hostname").output() {
             let h = String::from_utf8_lossy(&out.stdout).trim().to_string();

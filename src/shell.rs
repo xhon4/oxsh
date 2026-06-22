@@ -27,7 +27,7 @@ fn suggest_correction(cmd: &str, known_commands: &[String]) -> Option<String> {
     for name in all {
         let dist = strsim::damerau_levenshtein(cmd, name);
         if dist > 0 && dist <= threshold {
-            let is_better = best.map_or(true, |(_, d)| dist < d);
+            let is_better = best.is_none_or(|(_, d)| dist < d);
             if is_better {
                 let stop_early = dist == 1;
                 best = Some((name, dist));
@@ -188,7 +188,6 @@ impl Shell {
             .or_else(|| input.strip_prefix("??"))
         {
             let cmd = rest
-                .trim()
                 .split_whitespace()
                 .next()
                 .unwrap_or(rest.trim());
@@ -394,15 +393,14 @@ impl Shell {
             if self.last_exit_code == 127 {
                 // We need the command name; re-tokenize just the first token from segment
                 let first_token = parser::tokenize(segment).into_iter().next();
-                if let Some(cmd) = first_token {
-                    if let Some(suggestion) =
+                if let Some(cmd) = first_token
+                    && let Some(suggestion) =
                         suggest_correction(&cmd, &self.known_commands)
                     {
                         eprintln!(
                             "\x1b[33moxsh: did you mean \x1b[1m{suggestion}\x1b[22m?\x1b[0m",
                         );
                     }
-                }
             }
 
             if should_skip(op, self.last_exit_code) {
@@ -558,7 +556,7 @@ impl Shell {
                 }
                 let mut line = String::new();
                 match std::io::stdin().read_line(&mut line) {
-                    Ok(0) => return Some(1), // EOF
+                    Ok(0) => Some(1), // EOF
                     Ok(_) => {
                         let value = line.trim_end_matches('\n').trim_end_matches('\r');
                         self.shell_vars.set(var_name, value);

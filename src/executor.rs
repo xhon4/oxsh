@@ -112,14 +112,13 @@ pub fn execute_pipeline(commands: Vec<Command>) -> i32 {
                 .spawn()
             {
                 Ok(mut child) => {
-                    if let Some(data) = data_to_write {
-                        if let Some(child_stdin) = child.stdin.take() {
+                    if let Some(data) = data_to_write
+                        && let Some(child_stdin) = child.stdin.take() {
                             std::thread::spawn(move || {
                                 let mut w = child_stdin;
                                 w.write_all(data.as_bytes()).ok();
                             });
                         }
-                    }
 
                     if is_last {
                         if cmd.background {
@@ -389,18 +388,17 @@ fn write_final_output(output: &str, redirect: &Option<Redirect>, is_structured: 
 
     if is_structured && io::stdout().is_terminal() {
         let trimmed = output.trim();
-        if trimmed.starts_with('[') || trimmed.starts_with('{') {
-            if let Ok(val) = Value::from_json(trimmed) {
+        if (trimmed.starts_with('[') || trimmed.starts_with('{'))
+            && let Ok(val) = Value::from_json(trimmed) {
                 print!("{}", val.format_table());
                 return;
             }
-        }
     }
 
     print!("{output}");
 }
 
-fn wait_all(children: &mut Vec<Child>) {
+fn wait_all(children: &mut [Child]) {
     for child in children.iter_mut() {
         child.wait().ok();
     }
