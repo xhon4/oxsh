@@ -129,7 +129,7 @@ pub fn expand_shell_vars(tokens: &mut [String], vars: &ShellVars) {
             };
             match next {
                 '{' => {
-                    // ${VAR} — collect name up to '}'
+                    // ${VAR} or ${VAR:-default} — collect interior up to '}'
                     chars.next(); // consume '{'
                     let name_start = chars.peek().map(|&(p, _)| p).unwrap_or(src.len());
                     let mut name_end = src.len();
@@ -138,7 +138,16 @@ pub fn expand_shell_vars(tokens: &mut [String], vars: &ShellVars) {
                         chars.next();
                     }
                     if chars.peek().map(|&(_, c)| c) == Some('}') { chars.next(); }
-                    if let Some(val) = vars.resolve(&src[name_start..name_end]) {
+                    let interior = &src[name_start..name_end];
+                    // ${VAR:-default}: use default when VAR is unset or empty
+                    if let Some(sep) = interior.find(":-") {
+                        let name = &interior[..sep];
+                        let default = &interior[sep + 2..];
+                        match vars.resolve(name).filter(|v| !v.is_empty()) {
+                            Some(val) => result.push_str(&val),
+                            None => result.push_str(default),
+                        }
+                    } else if let Some(val) = vars.resolve(interior) {
                         result.push_str(&val);
                     }
                 }
@@ -389,10 +398,16 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "ISSUE #30 (V3): ${VAR:-default} parameter expansion not implemented."]
     fn default_value_parameter_expansion() {
-        let v = ShellVars::new();
+        let mut v = ShellVars::new();
+        // Unset variable → use default
         assert_eq!(expand("${NOPE:-fallback}", &v), "fallback");
+        // Set variable → use value
+        v.set("NOPE", "real");
+        assert_eq!(expand("${NOPE:-fallback}", &v), "real");
+        // Empty string counts as unset for :-
+        v.set("EMPTY", "");
+        assert_eq!(expand("${EMPTY:-fallback}", &v), "fallback");
     }
 
     // ── control-flow parsers ──
