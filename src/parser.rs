@@ -416,6 +416,10 @@ fn try_range_expand(inner: &str) -> Option<Vec<String>> {
 /// expansion. Escaped characters inside `$(...)` are skipped, not counted toward
 /// the parenthesis depth.
 pub fn expand_subshells(input: &str) -> String {
+    // Fast-path: avoid Vec<char> allocation when no expansion markers exist (P4).
+    if !input.contains('$') && !input.contains('`') {
+        return input.to_string();
+    }
     let chars: Vec<char> = input.chars().collect();
     let mut result = String::with_capacity(input.len());
     let mut i = 0;

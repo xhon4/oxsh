@@ -113,81 +113,60 @@ pub fn expand_shell_vars(tokens: &mut [String], vars: &ShellVars) {
         if !token.contains('$') {
             continue;
         }
-        let mut result = String::with_capacity(token.len());
-        let chars: Vec<char> = token.chars().collect();
-        let mut i = 0;
+        // Work on the raw bytes via char_indices() — no Vec<char> allocation (P3).
+        let src = std::mem::take(token);
+        let mut result = String::with_capacity(src.len());
+        let mut chars = src.char_indices().peekable();
 
-        while i < chars.len() {
-            if chars[i] == '$' && i + 1 < chars.len() {
-                i += 1;
-                match chars[i] {
-                    '{' => {
-                        // ${VAR} or ${VAR:-default} (default not yet supported — just expand)
-                        i += 1;
-                        let start = i;
-                        while i < chars.len() && chars[i] != '}' {
-                            i += 1;
-                        }
-                        let name: String = chars[start..i].iter().collect();
-                        if i < chars.len() {
-                            i += 1; // skip }
-                        }
-                        if let Some(val) = vars.resolve(&name) {
-                            result.push_str(&val);
-                        }
+        while let Some((_, ch)) = chars.next() {
+            if ch != '$' {
+                result.push(ch);
+                continue;
+            }
+            let Some(&(_, next)) = chars.peek() else {
+                result.push('$');
+                continue;
+            };
+            match next {
+                '{' => {
+                    // ${VAR} — collect name up to '}'
+                    chars.next(); // consume '{'
+                    let name_start = chars.peek().map(|&(p, _)| p).unwrap_or(src.len());
+                    let mut name_end = src.len();
+                    while let Some(&(p, c)) = chars.peek() {
+                        if c == '}' { name_end = p; break; }
+                        chars.next();
                     }
-                    '?' => {
-                        result.push_str(vars.resolve("?").as_deref().unwrap_or("0"));
-                        i += 1;
-                    }
-                    '$' => {
-                        // $$ → current process PID
-                        result.push_str(&std::process::id().to_string());
-                        i += 1;
-                    }
-                    '!' => {
-                        // $! → last background PID
-                        result.push_str(vars.resolve("!").as_deref().unwrap_or(""));
-                        i += 1;
-                    }
-                    '#' => {
-                        // $# → number of positional parameters
-                        result.push_str(vars.resolve("#").as_deref().unwrap_or("0"));
-                        i += 1;
-                    }
-                    '@' | '*' => {
-                        // $@ / $* → all positional parameters
-                        result.push_str(vars.resolve("@").as_deref().unwrap_or(""));
-                        i += 1;
-                    }
-                    '0' => {
-                        // $0 → shell name
-                        result.push_str(vars.resolve("0").as_deref().unwrap_or("oxsh"));
-                        i += 1;
-                    }
-                    c if c.is_ascii_digit() => {
-                        // $1..$9 → positional parameters
-                        let digit = c.to_string();
-                        result.push_str(vars.resolve(&digit).as_deref().unwrap_or(""));
-                        i += 1;
-                    }
-                    _ => {
-                        // $VAR
-                        let start = i;
-                        while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
-                            i += 1;
-                        }
-                        let name: String = chars[start..i].iter().collect();
-                        if name.is_empty() {
-                            result.push('$');
-                        } else if let Some(val) = vars.resolve(&name) {
-                            result.push_str(&val);
-                        }
+                    if chars.peek().map(|&(_, c)| c) == Some('}') { chars.next(); }
+                    if let Some(val) = vars.resolve(&src[name_start..name_end]) {
+                        result.push_str(&val);
                     }
                 }
-            } else {
-                result.push(chars[i]);
-                i += 1;
+                '?' => { chars.next(); result.push_str(vars.resolve("?").as_deref().unwrap_or("0")); }
+                '$' => { chars.next(); result.push_str(&std::process::id().to_string()); }
+                '!' => { chars.next(); result.push_str(vars.resolve("!").as_deref().unwrap_or("")); }
+                '#' => { chars.next(); result.push_str(vars.resolve("#").as_deref().unwrap_or("0")); }
+                '@' | '*' => { chars.next(); result.push_str(vars.resolve("@").as_deref().unwrap_or("")); }
+                '0' => { chars.next(); result.push_str(vars.resolve("0").as_deref().unwrap_or("oxsh")); }
+                c if c.is_ascii_digit() => {
+                    chars.next();
+                    result.push_str(vars.resolve(&c.to_string()).as_deref().unwrap_or(""));
+                }
+                _ => {
+                    // $VAR — collect identifier chars
+                    let name_start = chars.peek().map(|&(p, _)| p).unwrap_or(src.len());
+                    let mut name_end = src.len();
+                    while let Some(&(p, c)) = chars.peek() {
+                        if !c.is_alphanumeric() && c != '_' { name_end = p; break; }
+                        chars.next();
+                    }
+                    let name = &src[name_start..name_end];
+                    if name.is_empty() {
+                        result.push('$');
+                    } else if let Some(val) = vars.resolve(name) {
+                        result.push_str(&val);
+                    }
+                }
             }
         }
         *token = result;
