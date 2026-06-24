@@ -165,7 +165,7 @@ fn detect_git_branch(dir: &Path) -> Option<String> {
     if let Some(branch) = trimmed.strip_prefix("ref: refs/heads/") {
         Some(branch.to_string())
     } else {
-        Some(trimmed[..7.min(trimmed.len())].to_string())
+        Some(trimmed.chars().take(7).collect::<String>())
     }
 }
 

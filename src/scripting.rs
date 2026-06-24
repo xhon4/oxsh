@@ -153,7 +153,11 @@ pub fn expand_shell_vars(tokens: &mut [String], vars: &ShellVars) {
                 }
                 '?' => { chars.next(); result.push_str(vars.resolve("?").as_deref().unwrap_or("0")); }
                 '$' => { chars.next(); result.push_str(&std::process::id().to_string()); }
-                '!' => { chars.next(); result.push_str(vars.resolve("!").as_deref().unwrap_or("")); }
+                '!' => {
+                    chars.next();
+                    let pid = crate::executor::LAST_BG_PID.load(std::sync::atomic::Ordering::Relaxed);
+                    if pid > 0 { result.push_str(&pid.to_string()); }
+                }
                 '#' => { chars.next(); result.push_str(vars.resolve("#").as_deref().unwrap_or("0")); }
                 '@' | '*' => { chars.next(); result.push_str(vars.resolve("@").as_deref().unwrap_or("")); }
                 '0' => { chars.next(); result.push_str(vars.resolve("0").as_deref().unwrap_or("oxsh")); }

@@ -108,7 +108,9 @@ impl Config {
         let mut path = std::env::var("PATH").unwrap_or_default();
         for dir in self.path.prepend.iter().rev() {
             let expanded = shellexpand::tilde(dir).to_string();
-            if std::path::Path::new(&expanded).is_dir() {
+            if std::path::Path::new(&expanded).is_dir()
+                && !path.split(':').any(|p| p == expanded)
+            {
                 path = format!("{expanded}:{path}");
             }
         }
@@ -118,8 +120,9 @@ impl Config {
             if let Ok(entries) = std::fs::read_dir(&expanded) {
                 for entry in entries.flatten() {
                     let p = entry.path();
-                    if p.is_dir() {
-                        path = format!("{}:{path}", p.display());
+                    let ps = p.display().to_string();
+                    if p.is_dir() && !path.split(':').any(|e| e == ps) {
+                        path = format!("{ps}:{path}");
                     }
                 }
             }

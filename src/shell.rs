@@ -429,9 +429,13 @@ impl Shell {
                 let env_val = scripting::strip_quotes(&vt[0]).to_string();
                 // SAFETY: REPL runs on main thread; PATH scanner was joined before
                 // the loop; stdin-writer threads are joined per-command (M8).
+                let prev_env = std::env::var(key).ok();
                 unsafe { std::env::set_var(key, &env_val) };
                 self.last_exit_code = self.execute_line_inner(cmd);
-                unsafe { std::env::remove_var(key) };
+                match prev_env {
+                    Some(v) => unsafe { std::env::set_var(key, v) },
+                    None => unsafe { std::env::remove_var(key) },
+                }
                 if builtins::is_exit_signal(self.last_exit_code) {
                     let _ = self.line_editor.sync_history();
                     return true;
@@ -456,7 +460,7 @@ impl Shell {
                 continue;
             }
 
-            let (tokens, _quoted_flags) = expand_and_resolve(
+            let (tokens, quoted_flags) = expand_and_resolve(
                 segment,
                 &self.shell_vars,
                 &self.aliases,
@@ -472,7 +476,7 @@ impl Shell {
                 && parser::looks_like_directory(&tokens[0])
             {
                 let cd_args = vec!["cd".into(), tokens[0].clone()];
-                self.last_exit_code = builtins::try_builtin(&cd_args).unwrap_or(0);
+                self.last_exit_code = builtins::try_builtin(&cd_args, &self.shell_vars).unwrap_or(0);
                 if should_skip(op, self.last_exit_code) {
                     break;
                 }
@@ -489,7 +493,7 @@ impl Shell {
             }
 
             // Regular builtins
-            if let Some(code) = builtins::try_builtin(&tokens) {
+            if let Some(code) = builtins::try_builtin(&tokens, &self.shell_vars) {
                 if builtins::is_exit_signal(code) {
                     self.last_exit_code = code; // preserve encoded exit code for run_command
                     let _ = self.line_editor.sync_history();
@@ -506,13 +510,14 @@ impl Shell {
             let cmd_name = tokens.first().cloned().unwrap_or_default();
             // External commands — build pipeline directly from tokens to avoid
             // the join→re-parse round-trip that breaks arguments with spaces.
-            self.last_exit_code = self.execute_tokens(tokens, segment);
+            self.last_exit_code = self.execute_tokens(tokens, quoted_flags, segment);
 
             // Typo correction: suggest if command not found
             if self.last_exit_code == 127
                 && let Some(suggestion) = suggest_correction(&cmd_name, &self.known_commands)
             {
-                eprintln!("\x1b[33moxsh: did you mean \x1b[1m{suggestion}\x1b[22m?\x1b[0m");
+                let safe = context::sanitize_label(&suggestion);
+                eprintln!("\x1b[33moxsh: did you mean \x1b[1m{safe}\x1b[22m?\x1b[0m");
             }
 
             if should_skip(op, self.last_exit_code) {
@@ -530,10 +535,10 @@ impl Shell {
     ///   `tokens.join(" ")` → `parse_pipeline(string)`
     /// we split the already-expanded tokens on pipe markers and build
     /// Commands directly, preserving arguments with spaces.
-    fn execute_tokens(&self, tokens: Vec<String>, _original_segment: &str) -> i32 {
+    fn execute_tokens(&self, tokens: Vec<String>, quoted_flags: Vec<bool>, _original_segment: &str) -> i32 {
         // Split tokens into pipe stages on "|" token boundaries.
         // Redirect tokens (>, >>, <, 2>, 2>>, 2>&1) are handled per-stage.
-        let stages = split_tokens_on_pipes(tokens);
+        let stages = split_tokens_on_pipes(tokens, &quoted_flags);
 
         // If there's only one stage and no pipe was present, we can use the fast path.
         // For multi-stage pipelines we build Commands directly from token groups.
@@ -710,9 +715,13 @@ impl Shell {
             parser::expand_vars(&mut vt);
             let env_val = scripting::strip_quotes(&vt[0]).to_string();
             // SAFETY: see handle_input — REPL main thread, no concurrent env readers.
+            let prev_env = std::env::var(key).ok();
             unsafe { std::env::set_var(key, &env_val) };
             let code = self.execute_line_inner(cmd);
-            unsafe { std::env::remove_var(key) };
+            match prev_env {
+                Some(v) => unsafe { std::env::set_var(key, v) },
+                None => unsafe { std::env::remove_var(key) },
+            }
             return code;
         } else if let Some((key, raw_val)) = scripting::is_var_assignment(input) {
             let expanded_val = parser::expand_subshells(raw_val);
@@ -725,7 +734,7 @@ impl Shell {
             return 0;
         }
 
-        let (tokens, _) = expand_and_resolve(
+        let (tokens, quoted_flags) = expand_and_resolve(
             input,
             &self.shell_vars,
             &self.aliases,
@@ -735,12 +744,12 @@ impl Shell {
             return 0;
         }
 
-        if let Some(code) = builtins::try_builtin(&tokens) {
+        if let Some(code) = builtins::try_builtin(&tokens, &self.shell_vars) {
             return code; // propagates exit signal (with embedded exit code) to callers
         }
 
         // Use token-based pipeline building (no join→re-parse)
-        let stages = split_tokens_on_pipes(tokens);
+        let stages = split_tokens_on_pipes(tokens, &quoted_flags);
         let commands = parser::parse_pipeline_from_tokens(stages);
         executor::execute_pipeline(commands)
     }
@@ -774,15 +783,15 @@ fn explain_command(cmd: &str) {
 }
 
 /// Split a token list into pipeline stages on bare `|` tokens.
-/// A `|` token that appears as a standalone string (not inside a quoted arg)
-/// is a pipe separator — since tokens are already tokenized, any `|` here
-/// is a real pipe, not part of a quoted string.
-fn split_tokens_on_pipes(tokens: Vec<String>) -> Vec<Vec<String>> {
+/// `quoted_flags[i]` being true means token i was quoted — such a `|` is
+/// treated as a literal character, not a pipe separator.
+fn split_tokens_on_pipes(tokens: Vec<String>, quoted_flags: &[bool]) -> Vec<Vec<String>> {
     let mut stages: Vec<Vec<String>> = Vec::new();
     let mut current: Vec<String> = Vec::new();
 
-    for token in tokens {
-        if token == "|" {
+    for (i, token) in tokens.into_iter().enumerate() {
+        let is_quoted = quoted_flags.get(i).copied().unwrap_or(false);
+        if token == "|" && !is_quoted {
             stages.push(std::mem::take(&mut current));
         } else {
             current.push(token);

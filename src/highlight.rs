@@ -35,9 +35,15 @@ impl OxshHighlighter {
         if let Some(&exists) = self.cache.borrow().get(cmd) {
             return exists;
         }
-        // Slow path: filesystem check, then cache forever
+        // Slow path: filesystem check
         let exists = which::which(cmd).is_ok();
-        self.cache.borrow_mut().insert(cmd.to_string(), exists);
+        // Cap cache at 2048 entries; evict all when full to avoid unbounded growth.
+        // Positive hits are re-seeded next keystroke; stale negatives are also cleared.
+        let mut cache = self.cache.borrow_mut();
+        if cache.len() >= 2048 {
+            cache.clear();
+        }
+        cache.insert(cmd.to_string(), exists);
         exists
     }
 }

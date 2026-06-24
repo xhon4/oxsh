@@ -1,4 +1,5 @@
 use crate::context::ShellContext;
+use crate::scripting::ShellVars;
 use crate::structured;
 use std::env;
 use std::path::Path;
@@ -22,7 +23,7 @@ pub fn exit_code_from_signal(signal: i32) -> i32 { (-signal).saturating_sub(9999
 fn make_exit_signal(code: i32) -> i32 { -(9999 + code.clamp(0, 255)) }
 
 /// Execute a builtin command. Returns Some(exit_code) if handled, None if not a builtin.
-pub fn try_builtin(args: &[String]) -> Option<i32> {
+pub fn try_builtin(args: &[String], shell_vars: &ShellVars) -> Option<i32> {
     if args.is_empty() {
         return Some(0);
     }
@@ -32,7 +33,7 @@ pub fn try_builtin(args: &[String]) -> Option<i32> {
             let code = args.get(1).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
             Some(make_exit_signal(code))
         }
-        "export" => Some(builtin_export(args)),
+        "export" => Some(builtin_export(args, shell_vars)),
         "unset" => Some(builtin_unset(args)),
         "pwd" => {
             println!("{}", env::current_dir().unwrap_or_default().display());
@@ -88,14 +89,17 @@ fn builtin_cd(args: &[String]) -> i32 {
     }
 }
 
-fn builtin_export(args: &[String]) -> i32 {
+fn builtin_export(args: &[String], shell_vars: &ShellVars) -> i32 {
     for arg in &args[1..] {
         if let Some((key, val)) = arg.split_once('=') {
             let expanded = shellexpand::tilde(val).to_string();
             // SAFETY: REPL main thread only; see builtin_cd comment.
             unsafe { env::set_var(key, &expanded); }
         } else {
-            // export VAR (no value) — just ensure it's exported, noop in our model
+            // export VAR — promote the shell variable to the environment
+            if let Some(val) = shell_vars.resolve(arg) {
+                unsafe { env::set_var(arg, &val); }
+            }
         }
     }
     0

@@ -4,6 +4,15 @@ use crate::value::Value;
 use std::fs::{File, OpenOptions};
 use std::io::{self, IsTerminal, Read, Write};
 use std::process::{Child, Command as StdCommand, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
+
+/// PID of the last process spawned in the background (for `$!`). 0 = none.
+pub static LAST_BG_PID: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn dup2(oldfd: i32, newfd: i32) -> i32;
+}
 
 /// Internal state passed between pipeline stages
 enum PipeState {
@@ -95,8 +104,15 @@ pub fn execute_pipeline(commands: Vec<Command>) -> i32 {
                 Stdio::inherit()
             };
 
-            // Build stderr: handle 2>&1 (merge into stdout pipe) or redirect to file
-            let stderr = build_stderr(cmd, is_last, &stdout);
+            // Build stderr: handle 2>&1 or file redirect.
+            // For non-last pipeline stages with 2>&1, the child's fd 1 is the
+            // pipe write-end set up by the spawn machinery, NOT the shell's fd 1.
+            // We use pre_exec to dup2(1→2) in the child after that setup.
+            let stderr = if cmd.merge_stderr && !is_last {
+                Ok(Stdio::inherit()) // placeholder; pre_exec below will dup2(1→2)
+            } else {
+                build_stderr(cmd, &stdout)
+            };
             let stderr = match stderr {
                 Ok(s) => s,
                 Err(e) => {
@@ -105,13 +121,25 @@ pub fn execute_pipeline(commands: Vec<Command>) -> i32 {
                 }
             };
 
-            match StdCommand::new(&cmd.args[0])
-                .args(&cmd.args[1..])
-                .stdin(stdin)
-                .stdout(stdout)
-                .stderr(stderr)
-                .spawn()
-            {
+            let mut ext_cmd = StdCommand::new(&cmd.args[0]);
+            ext_cmd.args(&cmd.args[1..]).stdin(stdin).stdout(stdout).stderr(stderr);
+
+            // After fork, dup2(1, 2) routes stderr into the pipe write-end.
+            // dup2 is async-signal-safe per POSIX.1-2008 §2.4.3.
+            #[cfg(unix)]
+            if cmd.merge_stderr && !is_last {
+                use std::os::unix::process::CommandExt;
+                unsafe {
+                    ext_cmd.pre_exec(|| {
+                        if dup2(1, 2) == -1 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        Ok(())
+                    });
+                }
+            }
+
+            match ext_cmd.spawn() {
                 Ok(mut child) => {
                     if let Some(data) = data_to_write
                         && let Some(child_stdin) = child.stdin.take() {
@@ -129,7 +157,9 @@ pub fn execute_pipeline(commands: Vec<Command>) -> i32 {
 
                     if is_last {
                         if cmd.background {
-                            println!("[bg] pid={}", child.id());
+                            let pid = child.id();
+                            LAST_BG_PID.store(pid, Ordering::Relaxed);
+                            println!("[bg] pid={pid}");
                             wait_all(&mut children);
                             return 0;
                         }
@@ -165,11 +195,9 @@ pub fn execute_pipeline(commands: Vec<Command>) -> i32 {
 }
 
 /// Build the stderr Stdio for a command, handling 2>&1 and file redirects.
-fn build_stderr(
-    cmd: &Command,
-    _is_last: bool,
-    _stdout: &Stdio,
-) -> Result<Stdio, String> {
+/// For non-last pipeline stages with merge_stderr the caller uses pre_exec
+/// instead; this function covers the last-stage and single-command paths.
+fn build_stderr(cmd: &Command, _stdout: &Stdio) -> Result<Stdio, String> {
     if cmd.merge_stderr {
         // 2>&1: redirect stderr to stdout
         // std::process::Stdio doesn't expose try_clone on Stdio directly,
@@ -329,7 +357,9 @@ fn execute_single(cmd: &Command) -> i32 {
     {
         Ok(mut child) => {
             if cmd.background {
-                println!("[bg] pid={}", child.id());
+                let pid = child.id();
+                LAST_BG_PID.store(pid, Ordering::Relaxed);
+                println!("[bg] pid={pid}");
                 0
             } else {
                 child.wait().map(|s| s.code().unwrap_or(1)).unwrap_or(1)
