@@ -61,6 +61,33 @@ pub fn is_var_assignment(input: &str) -> Option<(&str, &str)> {
     Some((key, val))
 }
 
+/// Detect a `VAR=val cmd` env-prefix on a command line.
+///
+/// Returns `Some((key, value, command))` when a command follows the assignment.
+/// Returns `None` for pure assignments (`FOO=bar`) so the caller handles those.
+pub fn parse_env_prefix(input: &str) -> Option<(&str, &str, &str)> {
+    let (key, raw_val) = is_var_assignment(input)?;
+
+    if raw_val.starts_with('"') || raw_val.starts_with('\'') {
+        let q = raw_val.as_bytes()[0] as char;
+        let inner = &raw_val[1..];
+        let close = inner.find(q)?;
+        let after = inner[close + 1..].trim_start();
+        if after.is_empty() {
+            return None; // quoted pure assignment: FOO="bar baz"
+        }
+        return Some((key, &inner[..close], after));
+    }
+
+    let space_pos = raw_val.find(' ')?;
+    let val = &raw_val[..space_pos];
+    let cmd = raw_val[space_pos + 1..].trim_start();
+    if cmd.is_empty() {
+        return None;
+    }
+    Some((key, val, cmd))
+}
+
 /// Strip surrounding quotes from an already-expanded value string.
 /// Call this after subshell/variable expansion if the value came from a literal.
 pub fn strip_quotes(val: &str) -> &str {
@@ -313,9 +340,25 @@ mod tests {
 
     #[test]
     fn assignment_prefix_captures_rest_as_value() {
-        // The EC-Assign-Cmd bug (VAR=x cmd swallowing the command) lives in
-        // shell.rs execution, not here; this layer correctly returns the prefix.
+        // is_var_assignment returns the full RHS including any trailing command;
+        // parse_env_prefix (and shell.rs) handle the split into value vs. command.
         assert_eq!(is_var_assignment("a=b cmd"), Some(("a", "b cmd")));
+    }
+
+    #[test]
+    fn parse_env_prefix_splits_unquoted() {
+        assert_eq!(parse_env_prefix("FOO=bar cmd"), Some(("FOO", "bar", "cmd")));
+        assert_eq!(parse_env_prefix("FOO=bar"), None);
+        assert_eq!(parse_env_prefix("FOO=bar "), None);
+    }
+
+    #[test]
+    fn parse_env_prefix_handles_quoted_value() {
+        assert_eq!(
+            parse_env_prefix("FOO=\"bar baz\" cmd"),
+            Some(("FOO", "bar baz", "cmd"))
+        );
+        assert_eq!(parse_env_prefix("FOO=\"bar baz\""), None);
     }
 
     // ── strip_quotes ──

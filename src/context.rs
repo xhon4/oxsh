@@ -171,7 +171,7 @@ fn detect_git_branch(dir: &Path) -> Option<String> {
 
 fn detect_k8s_context() -> Option<String> {
     let kubeconfig = env::var("KUBECONFIG").ok().or_else(|| {
-        dirs_next::home_dir().map(|h| h.join(".kube/config").to_string_lossy().to_string())
+        dirs::home_dir().map(|h| h.join(".kube/config").to_string_lossy().to_string())
     })?;
     if !Path::new(&kubeconfig).exists() {
         return None;

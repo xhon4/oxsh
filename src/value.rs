@@ -245,13 +245,16 @@ impl CmpOp {
         match self {
             CmpOp::Eq => {
                 if let (Some(ln), Ok(rn)) = (left.as_number(), right_str.parse::<f64>()) {
-                    return (ln - rn).abs() < f64::EPSILON;
+                    // Relative epsilon: absolute EPSILON is only valid near 1.0.
+                    let scale = ln.abs().max(rn.abs()).max(1.0);
+                    return (ln - rn).abs() <= f64::EPSILON * scale;
                 }
                 left.as_str_lossy() == right_str
             }
             CmpOp::Ne => {
                 if let (Some(ln), Ok(rn)) = (left.as_number(), right_str.parse::<f64>()) {
-                    return (ln - rn).abs() >= f64::EPSILON;
+                    let scale = ln.abs().max(rn.abs()).max(1.0);
+                    return (ln - rn).abs() > f64::EPSILON * scale;
                 }
                 left.as_str_lossy() != right_str
             }

@@ -41,7 +41,7 @@ pub static BUILTIN_NAMES: &[&str] = &[
 
 fn builtin_cd(args: &[String]) -> i32 {
     let target = if args.len() < 2 {
-        dirs_next::home_dir()
+        dirs::home_dir()
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_else(|| "/".into())
     } else if args[1] == "-" {
@@ -54,6 +54,9 @@ fn builtin_cd(args: &[String]) -> i32 {
     let path = Path::new(&target);
     match env::set_current_dir(path) {
         Ok(()) => {
+            // SAFETY: called only from the REPL main thread. The PATH scanner
+            // thread is joined before the REPL starts; stdin-writer threads are
+            // joined after each command. No concurrent env readers.
             unsafe {
                 env::set_var("OLDPWD", old);
                 env::set_var("PWD", env::current_dir().unwrap_or_default());
@@ -71,6 +74,7 @@ fn builtin_export(args: &[String]) -> i32 {
     for arg in &args[1..] {
         if let Some((key, val)) = arg.split_once('=') {
             let expanded = shellexpand::tilde(val).to_string();
+            // SAFETY: REPL main thread only; see builtin_cd comment.
             unsafe { env::set_var(key, &expanded); }
         } else {
             // export VAR (no value) — just ensure it's exported, noop in our model
@@ -81,6 +85,7 @@ fn builtin_export(args: &[String]) -> i32 {
 
 fn builtin_unset(args: &[String]) -> i32 {
     for arg in &args[1..] {
+        // SAFETY: REPL main thread only; see builtin_cd comment.
         unsafe { env::remove_var(arg); }
     }
     0

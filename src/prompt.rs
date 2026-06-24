@@ -79,9 +79,9 @@ impl OxshPrompt {
                     None
                 }
             }
-            "cwd" | "cwd:short" => {
+            "cwd" => {
                 let cwd = env::current_dir().unwrap_or_default();
-                let text = if let Some(home) = dirs_next::home_dir() {
+                let text = if let Some(home) = dirs::home_dir() {
                     if let Ok(rest) = cwd.strip_prefix(&home) {
                         if rest.as_os_str().is_empty() {
                             " ~".into()
@@ -93,6 +93,24 @@ impl OxshPrompt {
                     }
                 } else {
                     format!(" {}", cwd.display())
+                };
+                let text = crate::context::sanitize_label(&text);
+                Some(Segment { text: format!("{text} "), fg: Color::White, bg: Color::DarkCyan })
+            }
+            "cwd:short" => {
+                let cwd = env::current_dir().unwrap_or_default();
+                let text = if let Some(home) = dirs::home_dir() {
+                    if let Ok(rest) = cwd.strip_prefix(&home) {
+                        if rest.as_os_str().is_empty() {
+                            " ~".into()
+                        } else {
+                            format!(" ~/{}", abbrev_path_components(&rest.display().to_string()))
+                        }
+                    } else {
+                        format!(" {}", abbrev_path_components(&cwd.display().to_string()))
+                    }
+                } else {
+                    format!(" {}", abbrev_path_components(&cwd.display().to_string()))
                 };
                 let text = crate::context::sanitize_label(&text);
                 Some(Segment { text: format!("{text} "), fg: Color::White, bg: Color::DarkCyan })
@@ -280,4 +298,26 @@ impl Prompt for OxshPrompt {
     ) -> Cow<'_, str> {
         Cow::Borrowed("(search) ")
     }
+}
+
+/// Abbreviate all but the last path component to their first Unicode char.
+/// `projects/oxsh/src` → `p/oxsh/src`
+fn abbrev_path_components(path: &str) -> String {
+    let parts: Vec<&str> = path.split('/').collect();
+    if parts.len() <= 2 {
+        return path.to_string();
+    }
+    let last = parts.len() - 1;
+    parts
+        .iter()
+        .enumerate()
+        .map(|(i, part)| {
+            if i == last || part.is_empty() {
+                (*part).to_string()
+            } else {
+                part.chars().next().map_or(String::new(), |c| c.to_string())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }

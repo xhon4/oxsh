@@ -129,8 +129,10 @@ fn split_pipe_segments(input: &str) -> Vec<(String, Option<String>)> {
                 current.push('\\');
                 i += 1;
                 if i < bytes.len() {
-                    current.push(bytes[i] as char);
-                    i += 1;
+                    // Push the full char (may be multibyte after the backslash).
+                    let ch_len = input[i..].chars().next().map_or(1, |c| c.len_utf8());
+                    current.push_str(&input[i..i + ch_len]);
+                    i += ch_len;
                 }
             }
             b'|' if !in_single && !in_double => {
@@ -151,8 +153,10 @@ fn split_pipe_segments(input: &str) -> Vec<(String, Option<String>)> {
                 i += 1;
             }
             _ => {
-                current.push(bytes[i] as char);
-                i += 1;
+                // Push the full Unicode char (avoid byte-by-byte mojibake).
+                let ch_len = input[i..].chars().next().map_or(1, |c| c.len_utf8());
+                current.push_str(&input[i..i + ch_len]);
+                i += ch_len;
             }
         }
     }

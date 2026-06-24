@@ -518,7 +518,10 @@ fn run_subshell(cmd: &str) -> String {
             let s = String::from_utf8_lossy(&output.stdout);
             s.trim_end_matches('\n').to_string()
         }
-        Err(_) => String::new(),
+        Err(e) => {
+            eprintln!("oxsh: $({cmd}): {e}");
+            String::new()
+        }
     }
 }
 

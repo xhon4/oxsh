@@ -32,6 +32,7 @@ pub fn execute_pipeline(commands: Vec<Command>) -> i32 {
     let last = commands.len() - 1;
     let mut prev = PipeState::None;
     let mut children: Vec<Child> = Vec::new();
+    let mut write_threads: Vec<std::thread::JoinHandle<()>> = Vec::new();
 
     for (i, cmd) in commands.iter().enumerate() {
         if cmd.args.is_empty() {
@@ -114,10 +115,16 @@ pub fn execute_pipeline(commands: Vec<Command>) -> i32 {
                 Ok(mut child) => {
                     if let Some(data) = data_to_write
                         && let Some(child_stdin) = child.stdin.take() {
-                            std::thread::spawn(move || {
+                            let handle = std::thread::spawn(move || {
                                 let mut w = child_stdin;
-                                w.write_all(data.as_bytes()).ok();
+                                if let Err(e) = w.write_all(data.as_bytes()) {
+                                    // BrokenPipe is expected when the consumer closes early (e.g. `head`).
+                                    if e.kind() != std::io::ErrorKind::BrokenPipe {
+                                        eprintln!("oxsh: pipe write error: {e}");
+                                    }
+                                }
                             });
+                            write_threads.push(handle);
                         }
 
                     if is_last {
@@ -149,6 +156,10 @@ pub fn execute_pipeline(commands: Vec<Command>) -> i32 {
                 exit_code = 1;
             }
         }
+    }
+    // Join stdin-writer threads after children have exited (broken pipe is safe here).
+    for handle in write_threads {
+        handle.join().ok();
     }
     exit_code
 }
@@ -186,25 +197,47 @@ fn build_stderr(
     }
 }
 
-/// Returns a Stdio that writes to stdout (for 2>&1).
-/// Uses platform-specific fd duplication.
+/// Returns a Stdio that writes to the current stdout destination (for 2>&1).
+/// Duplicates the fd/handle so the shell's own fd 1 is never closed on drop.
 fn merge_stderr_to_stdout() -> Stdio {
     #[cfg(unix)]
     {
-        use std::os::unix::io::FromRawFd;
-        // SAFETY: fd 1 is always stdout on POSIX systems and remains valid for the
-        // lifetime of the process. The resulting Stdio duplicates the fd internally,
-        // so the original fd 1 is not closed or invalidated.
-        unsafe { Stdio::from_raw_fd(1) }
+        use std::os::unix::io::{FromRawFd, IntoRawFd};
+        // SAFETY: fd 1 is valid for the lifetime of the process. We wrap it
+        // temporarily to call try_clone() (= dup(1)), which produces a new fd
+        // pointing to the same pipe/file. into_raw_fd() releases ownership of
+        // fd 1 so it is never closed; only the duplicate is handed to Stdio.
+        let guard = unsafe { File::from_raw_fd(1) };
+        let duped = guard.try_clone().expect("dup(stdout) failed");
+        let _ = guard.into_raw_fd(); // release — do NOT close fd 1
+        unsafe { Stdio::from_raw_fd(duped.into_raw_fd()) }
     }
     #[cfg(windows)]
     {
         use std::os::windows::io::{FromRawHandle, RawHandle};
-        use windows_sys::Win32::System::Console::GetStdHandle;
-        use windows_sys::Win32::System::Console::STD_OUTPUT_HANDLE;
+        use windows_sys::Win32::Foundation::{CloseHandle, DUPLICATE_SAME_ACCESS, HANDLE};
+        use windows_sys::Win32::System::Console::{GetStdHandle, STD_OUTPUT_HANDLE};
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+        // SAFETY: DuplicateHandle creates a new handle for the child so the
+        // original STD_OUTPUT_HANDLE is never invalidated by the Stdio drop.
         unsafe {
-            let handle = GetStdHandle(STD_OUTPUT_HANDLE);
-            Stdio::from_raw_handle(handle as RawHandle)
+            let proc = GetCurrentProcess();
+            let src = GetStdHandle(STD_OUTPUT_HANDLE);
+            let mut dup: HANDLE = 0;
+            let ok = windows_sys::Win32::Foundation::DuplicateHandle(
+                proc,
+                src,
+                proc,
+                &mut dup,
+                0,
+                0,
+                DUPLICATE_SAME_ACCESS,
+            );
+            if ok != 0 {
+                Stdio::from_raw_handle(dup as RawHandle)
+            } else {
+                Stdio::inherit()
+            }
         }
     }
     #[cfg(not(any(unix, windows)))]
@@ -225,7 +258,9 @@ fn execute_structured_standalone(cmd: &Command) -> i32 {
         }
     } else {
         let mut buf = String::new();
-        io::stdin().read_to_string(&mut buf).ok();
+        if let Err(e) = io::stdin().read_to_string(&mut buf) {
+            eprintln!("oxsh: stdin read error: {e}");
+        }
         buf
     };
 
@@ -377,7 +412,9 @@ fn write_final_output(output: &str, redirect: &Option<Redirect>, is_structured: 
     if let Some(redirect) = redirect {
         match open_redirect(redirect) {
             Ok(mut f) => {
-                f.write_all(output.as_bytes()).ok();
+                if let Err(e) = f.write_all(output.as_bytes()) {
+                    eprintln!("oxsh: write error: {e}");
+                }
             }
             Err(e) => {
                 eprintln!("oxsh: {e}");

@@ -237,6 +237,10 @@ impl Shell {
                 for item in &for_loop.items {
                     self.shell_vars.set(&for_loop.var, item);
                     self.last_exit_code = self.execute_line_inner(&for_loop.body);
+                    if self.last_exit_code == builtins::EXIT_SIGNAL {
+                        let _ = self.line_editor.sync_history();
+                        return true;
+                    }
                 }
                 if should_skip(op, self.last_exit_code) {
                     break;
@@ -266,6 +270,10 @@ impl Shell {
                         break;
                     }
                     self.last_exit_code = self.execute_line_inner(&while_loop.body);
+                    if self.last_exit_code == builtins::EXIT_SIGNAL {
+                        let _ = self.line_editor.sync_history();
+                        return true;
+                    }
                     iterations += 1;
                     if iterations >= max_iter {
                         eprintln!(
@@ -286,8 +294,16 @@ impl Shell {
                 let cond_code = self.execute_line_inner(&if_block.condition);
                 if cond_code == 0 {
                     self.last_exit_code = self.execute_line_inner(&if_block.then_body);
+                    if self.last_exit_code == builtins::EXIT_SIGNAL {
+                        let _ = self.line_editor.sync_history();
+                        return true;
+                    }
                 } else if let Some(ref else_body) = if_block.else_body {
                     self.last_exit_code = self.execute_line_inner(else_body);
+                    if self.last_exit_code == builtins::EXIT_SIGNAL {
+                        let _ = self.line_editor.sync_history();
+                        return true;
+                    }
                 }
                 if should_skip(op, self.last_exit_code) {
                     break;
@@ -295,16 +311,33 @@ impl Shell {
                 continue;
             }
 
-            // Variable assignment: VAR=value or VAR=$(cmd)
-            // Check BEFORE subshell expansion so we can handle the RHS ourselves.
-            if let Some((key, raw_val)) = scripting::is_var_assignment(segment) {
-                // Expand subshells and variables in the RHS
+            // Variable assignment: VAR=value or env-prefix VAR=val cmd
+            if let Some((key, val, cmd)) = scripting::parse_env_prefix(segment) {
+                // VAR=val cmd — run `cmd` with KEY=val in its environment only.
+                let mut vt = vec![val.to_string()];
+                scripting::expand_shell_vars(&mut vt, &self.shell_vars);
+                parser::expand_vars(&mut vt);
+                let env_val = scripting::strip_quotes(&vt[0]).to_string();
+                // SAFETY: REPL runs on main thread; PATH scanner was joined before
+                // the loop; stdin-writer threads are joined per-command (M8).
+                unsafe { std::env::set_var(key, &env_val) };
+                self.last_exit_code = self.execute_line_inner(cmd);
+                unsafe { std::env::remove_var(key) };
+                if self.last_exit_code == builtins::EXIT_SIGNAL {
+                    let _ = self.line_editor.sync_history();
+                    return true;
+                }
+                if should_skip(op, self.last_exit_code) {
+                    break;
+                }
+                continue;
+            } else if let Some((key, raw_val)) = scripting::is_var_assignment(segment) {
+                // Pure assignment: VAR=value — set in shell variable table.
                 let expanded_val = parser::expand_subshells(raw_val);
                 let mut val_tokens = parser::tokenize(&expanded_val);
                 scripting::expand_shell_vars(&mut val_tokens, &self.shell_vars);
                 parser::expand_vars(&mut val_tokens);
                 let final_val = val_tokens.join(" ");
-                // Strip surrounding quotes from the final scalar value
                 let final_val = scripting::strip_quotes(&final_val).to_string();
                 self.shell_vars.set(key, &final_val);
                 self.last_exit_code = 0;
@@ -344,7 +377,9 @@ impl Shell {
             }
             parser::expand_braces(&mut tokens);
             quoted_flags.resize(tokens.len(), false);
-            parser::expand_globs_respecting_quotes(&mut tokens, &quoted_flags);
+            if self.config.shell.glob {
+                parser::expand_globs_respecting_quotes(&mut tokens, &quoted_flags);
+            }
 
             if tokens.is_empty() {
                 continue;
@@ -587,8 +622,18 @@ impl Shell {
     /// Execute a single line as a command (used by for/while/if bodies and recursion).
     /// This path goes through full expansion + token-based pipeline building.
     fn execute_line_inner(&mut self, input: &str) -> i32 {
-        // Variable assignment check on raw input (before expansion)
-        if let Some((key, raw_val)) = scripting::is_var_assignment(input) {
+        // Variable assignment: env-prefix first, then pure assignment
+        if let Some((key, val, cmd)) = scripting::parse_env_prefix(input) {
+            let mut vt = vec![val.to_string()];
+            scripting::expand_shell_vars(&mut vt, &self.shell_vars);
+            parser::expand_vars(&mut vt);
+            let env_val = scripting::strip_quotes(&vt[0]).to_string();
+            // SAFETY: see handle_input — REPL main thread, no concurrent env readers.
+            unsafe { std::env::set_var(key, &env_val) };
+            let code = self.execute_line_inner(cmd);
+            unsafe { std::env::remove_var(key) };
+            return code;
+        } else if let Some((key, raw_val)) = scripting::is_var_assignment(input) {
             let expanded_val = parser::expand_subshells(raw_val);
             let mut val_tokens = parser::tokenize(&expanded_val);
             scripting::expand_shell_vars(&mut val_tokens, &self.shell_vars);
@@ -622,7 +667,9 @@ impl Shell {
         }
         parser::expand_braces(&mut tokens);
         quoted_flags.resize(tokens.len(), false);
-        parser::expand_globs_respecting_quotes(&mut tokens, &quoted_flags);
+        if self.config.shell.glob {
+            parser::expand_globs_respecting_quotes(&mut tokens, &quoted_flags);
+        }
 
         if tokens.is_empty() {
             return 0;

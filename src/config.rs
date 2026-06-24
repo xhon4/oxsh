@@ -124,11 +124,13 @@ impl Config {
                 }
             }
         }
+        // SAFETY: apply_env() is called at startup before any threads are spawned.
         unsafe { std::env::set_var("PATH", &path); }
 
         // Set env vars
         for (key, val) in &self.env {
             let expanded = shellexpand::tilde(val).to_string();
+            // SAFETY: startup only, pre-threads.
             unsafe { std::env::set_var(key, &expanded); }
         }
     }
@@ -184,20 +186,20 @@ pub fn generate_default_config(force: bool) -> Option<PathBuf> {
 fn default_config_destination() -> PathBuf {
     if cfg!(windows) {
         // Windows: %APPDATA%\oxsh\config.toml
-        dirs_next::config_dir()
+        dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("oxsh")
             .join("config.toml")
     } else {
         // Linux/macOS: ~/.oxshrc
-        dirs_next::home_dir()
+        dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".oxshrc")
     }
 }
 
 fn config_file_path() -> PathBuf {
-    let home = dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
 
     // Primary: ~/.oxshrc (Linux/macOS)
     let oxshrc = home.join(".oxshrc");
@@ -207,7 +209,7 @@ fn config_file_path() -> PathBuf {
 
     // Windows primary: %APPDATA%\oxsh\config.toml
     if cfg!(windows)
-        && let Some(config_dir) = dirs_next::config_dir() {
+        && let Some(config_dir) = dirs::config_dir() {
             let win_config = config_dir.join("oxsh").join("config.toml");
             if win_config.exists() {
                 return win_config;
@@ -215,7 +217,7 @@ fn config_file_path() -> PathBuf {
         }
 
     // Fallback: ~/.config/oxsh/config.toml (legacy)
-    if let Some(config_dir) = dirs_next::config_dir() {
+    if let Some(config_dir) = dirs::config_dir() {
         let legacy = config_dir.join("oxsh").join("config.toml");
         if legacy.exists() {
             eprintln!("oxsh: hint: move {} to ~/.oxshrc", legacy.display());

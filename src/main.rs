@@ -17,10 +17,60 @@ use config::Config;
 use highlight::OxshHighlighter;
 use reedline::{
     default_emacs_keybindings, default_vi_insert_keybindings, default_vi_normal_keybindings,
-    ColumnarMenu, EditMode, Emacs, FileBackedHistory, KeyCode,
-    KeyModifiers, MenuBuilder, Reedline, ReedlineEvent, ReedlineMenu,
-    DefaultHinter, Vi,
+    ColumnarMenu, EditMode, Emacs, FileBackedHistory, History, HistoryItem, HistoryItemId,
+    HistorySessionId, KeyCode, KeyModifiers, MenuBuilder, Reedline, ReedlineEvent, ReedlineMenu,
+    DefaultHinter, SearchQuery, Vi,
 };
+
+/// Wraps any History backend and skips saving consecutive identical commands.
+struct DedupHistory {
+    inner: FileBackedHistory,
+    last_cmd: Option<String>,
+}
+
+impl DedupHistory {
+    fn new(inner: FileBackedHistory) -> Self {
+        Self { inner, last_cmd: None }
+    }
+}
+
+impl History for DedupHistory {
+    fn save(&mut self, h: HistoryItem) -> reedline::Result<HistoryItem> {
+        if self.last_cmd.as_deref() == Some(h.command_line.as_str()) {
+            return Ok(h);
+        }
+        self.last_cmd = Some(h.command_line.clone());
+        self.inner.save(h)
+    }
+    fn load(&self, id: HistoryItemId) -> reedline::Result<HistoryItem> {
+        self.inner.load(id)
+    }
+    fn count(&self, query: SearchQuery) -> reedline::Result<i64> {
+        self.inner.count(query)
+    }
+    fn search(&self, query: SearchQuery) -> reedline::Result<Vec<HistoryItem>> {
+        self.inner.search(query)
+    }
+    fn update(
+        &mut self,
+        id: HistoryItemId,
+        updater: &dyn Fn(HistoryItem) -> HistoryItem,
+    ) -> reedline::Result<()> {
+        self.inner.update(id, updater)
+    }
+    fn clear(&mut self) -> reedline::Result<()> {
+        self.inner.clear()
+    }
+    fn delete(&mut self, h: HistoryItemId) -> reedline::Result<()> {
+        self.inner.delete(h)
+    }
+    fn sync(&mut self) -> std::io::Result<()> {
+        self.inner.sync()
+    }
+    fn session(&self) -> Option<HistorySessionId> {
+        self.inner.session()
+    }
+}
 use nu_ansi_term::{Color, Style};
 use std::collections::HashMap;
 
@@ -172,8 +222,13 @@ fn main() {
     );
 
     // Build reedline
+    let boxed_history: Box<dyn History> = if config.history.ignore_dups {
+        Box::new(DedupHistory::new(history))
+    } else {
+        Box::new(history)
+    };
     let line_editor = Reedline::create()
-        .with_history(Box::new(history))
+        .with_history(boxed_history)
         .with_history_session_id(Reedline::create_history_session_id())
         .with_history_exclusion_prefix(Some(" ".to_string()))
         .with_edit_mode(edit_mode)
