@@ -80,6 +80,74 @@ fn expand_and_resolve(
     (tokens, quoted_flags)
 }
 
+/// Returns true if `input` contains `!!` or `!$` outside of single or double quotes.
+fn has_unquoted_bang(input: &str) -> bool {
+    let mut in_single = false;
+    let mut in_double = false;
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' if !in_double => in_single = !in_single,
+            b'"' if !in_single => in_double = !in_double,
+            b'\\' if !in_single => i += 1, // skip next byte
+            b'!' if !in_single && !in_double
+                && i + 1 < bytes.len()
+                && (bytes[i + 1] == b'!' || bytes[i + 1] == b'$') =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Expand `!!` and `!$` in `input`, but only at positions that are outside quotes.
+fn expand_bang_history(input: &str, last_cmd: &str, last_arg: &str) -> String {
+    let mut result = String::with_capacity(input.len() + last_cmd.len());
+    let mut in_single = false;
+    let mut in_double = false;
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' if !in_double => {
+                in_single = !in_single;
+                result.push('\'');
+            }
+            b'"' if !in_single => {
+                in_double = !in_double;
+                result.push('"');
+            }
+            b'\\' if !in_single => {
+                result.push('\\');
+                i += 1;
+                if i < bytes.len() {
+                    result.push(bytes[i] as char);
+                }
+            }
+            b'!' if !in_single && !in_double && i + 1 < bytes.len() => {
+                if bytes[i + 1] == b'!' {
+                    result.push_str(last_cmd);
+                    i += 2;
+                    continue;
+                } else if bytes[i + 1] == b'$' {
+                    result.push_str(last_arg);
+                    i += 2;
+                    continue;
+                } else {
+                    result.push('!');
+                }
+            }
+            c => result.push(c as char),
+        }
+        i += 1;
+    }
+    result
+}
+
 pub struct Shell {
     pub config: Config,
     line_editor: Reedline,
@@ -173,8 +241,8 @@ impl Shell {
                         continue;
                     }
 
-                    // History expansion: !! and !$
-                    let input = if trimmed.contains("!!") || trimmed.contains("!$") {
+                    // History expansion: !! and !$ — only outside quotes (L3).
+                    let input = if has_unquoted_bang(trimmed) {
                         if self.last_command.is_empty() {
                             eprintln!("oxsh: no previous command");
                             continue;
@@ -184,9 +252,7 @@ impl Shell {
                             .last()
                             .unwrap_or("")
                             .to_string();
-                        trimmed
-                            .replace("!!", &self.last_command)
-                            .replace("!$", &last_arg)
+                        expand_bang_history(trimmed, &self.last_command, &last_arg)
                     } else {
                         trimmed.to_string()
                     };
