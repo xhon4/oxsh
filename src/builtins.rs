@@ -3,8 +3,23 @@ use crate::structured;
 use std::env;
 use std::path::Path;
 
-/// Special exit code returned by exit/quit to signal the main loop to break
+/// Sentinel range: any `code <= EXIT_SIGNAL` means "terminate the shell".
+/// The actual exit code is encoded as `-(9999 + requested_code)`.
+/// `EXIT_SIGNAL` itself (-9999) encodes exit code 0.
 pub const EXIT_SIGNAL: i32 = -9999;
+
+/// Returns true when `code` is an exit-signal (produced by `exit`/`quit`).
+#[inline]
+pub fn is_exit_signal(code: i32) -> bool { code <= EXIT_SIGNAL }
+
+/// Decodes the requested exit code out of an exit-signal value.
+/// Saturates to [0, 255] — matches POSIX `exit` behavior.
+#[inline]
+pub fn exit_code_from_signal(signal: i32) -> i32 { (-signal).saturating_sub(9999).clamp(0, 255) }
+
+/// Encodes `code` into an exit-signal value.
+#[inline]
+fn make_exit_signal(code: i32) -> i32 { -(9999 + code.clamp(0, 255)) }
 
 /// Execute a builtin command. Returns Some(exit_code) if handled, None if not a builtin.
 pub fn try_builtin(args: &[String]) -> Option<i32> {
@@ -13,7 +28,10 @@ pub fn try_builtin(args: &[String]) -> Option<i32> {
     }
     match args[0].as_str() {
         "cd" => Some(builtin_cd(args)),
-        "exit" | "quit" => Some(EXIT_SIGNAL),
+        "exit" | "quit" => {
+            let code = args.get(1).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
+            Some(make_exit_signal(code))
+        }
         "export" => Some(builtin_export(args)),
         "unset" => Some(builtin_unset(args)),
         "pwd" => {

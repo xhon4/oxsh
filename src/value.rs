@@ -435,4 +435,26 @@ mod tests {
         assert!(val.format_table().contains("key"));
         assert!(val.format_table().contains("value"));
     }
+
+    #[test]
+    fn cmpop_large_magnitude_floats() {
+        let gt = CmpOp::parse(">").unwrap();
+        let lt = CmpOp::parse("<").unwrap();
+        let eq = CmpOp::parse("==").unwrap();
+
+        // Moderate large floats that are exactly representable in f64.
+        assert!(gt.compare(&Value::Float(1_000_000.5), "999999.9"));
+        assert!(!lt.compare(&Value::Float(1_000_000.5), "999999.9"));
+
+        // Near the f64 integer-precision boundary (2^53 = 9_007_199_254_740_992).
+        // 2^53 - 1 is exactly representable; comparison must not panic.
+        let two53 = Value::Float(9_007_199_254_740_992.0_f64);
+        assert!(gt.compare(&two53, "9007199254740991.0"));
+
+        // Values beyond 2^53: f64 arithmetic loses LSB precision.
+        // The critical invariant is that the comparison stays consistent — no NaN,
+        // no panic, and equal values compare equal.
+        let large = Value::Float(1e18_f64);
+        assert!(eq.compare(&large, "1e18"));
+    }
 }

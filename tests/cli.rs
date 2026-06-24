@@ -154,3 +154,63 @@ fn variable_values_are_not_expanded_twice() {
                 .and(predicate::str::contains("should-not-appear").not()),
         );
 }
+
+// ── Issue #6 integration coverage ──
+
+#[test]
+fn stderr_merge_survives_pipeline() {
+    // `2>&1` must redirect stderr into the pipe write-end so the downstream
+    // stage receives it on stdin (and hence stdout). The pipeline exit code is
+    // that of the last stage (cat → 0), so the overall command succeeds.
+    oxsh()
+        .args(["-c", "ls /no-such-dir-oxsh-2and1-test 2>&1 | cat"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no-such-dir-oxsh-2and1-test"));
+}
+
+#[test]
+fn env_prefix_sets_var_for_child_only() {
+    // `VAR=val cmd` must inject VAR into cmd's environment.
+    oxsh()
+        .args(["-c", "OXSH_TESTVAR=hello123 printenv OXSH_TESTVAR"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hello123"));
+}
+
+#[test]
+fn exit_propagates_from_if_block() {
+    oxsh()
+        .args(["-c", "if true; then exit 42; fi"])
+        .assert()
+        .code(42);
+}
+
+#[test]
+fn exit_propagates_from_for_block() {
+    oxsh()
+        .args(["-c", "for i in 1 2; do exit 7; done"])
+        .assert()
+        .code(7);
+}
+
+#[test]
+fn exit_propagates_from_while_block() {
+    oxsh()
+        .args(["-c", "while true; do exit 3; done"])
+        .assert()
+        .code(3);
+}
+
+#[test]
+fn partial_pipeline_consumer_does_not_hang() {
+    // `head -1` closes the read-end of the pipe after one line; the upstream
+    // producer must handle SIGPIPE / write errors without hanging.
+    oxsh()
+        .args(["-c", "printf 'line1\\nline2\\nline3\\n' | head -1"])
+        .timeout(std::time::Duration::from_secs(5))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("line1").and(predicate::str::contains("line2").not()));
+}

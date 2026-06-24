@@ -342,7 +342,7 @@ impl Shell {
                 for item in &for_loop.items {
                     self.shell_vars.set(&for_loop.var, item);
                     self.last_exit_code = self.execute_line_inner(&for_loop.body);
-                    if self.last_exit_code == builtins::EXIT_SIGNAL {
+                    if builtins::is_exit_signal(self.last_exit_code) {
                         let _ = self.line_editor.sync_history();
                         return true;
                     }
@@ -375,7 +375,7 @@ impl Shell {
                         break;
                     }
                     self.last_exit_code = self.execute_line_inner(&while_loop.body);
-                    if self.last_exit_code == builtins::EXIT_SIGNAL {
+                    if builtins::is_exit_signal(self.last_exit_code) {
                         let _ = self.line_editor.sync_history();
                         return true;
                     }
@@ -399,13 +399,13 @@ impl Shell {
                 let cond_code = self.execute_line_inner(&if_block.condition);
                 if cond_code == 0 {
                     self.last_exit_code = self.execute_line_inner(&if_block.then_body);
-                    if self.last_exit_code == builtins::EXIT_SIGNAL {
+                    if builtins::is_exit_signal(self.last_exit_code) {
                         let _ = self.line_editor.sync_history();
                         return true;
                     }
                 } else if let Some(ref else_body) = if_block.else_body {
                     self.last_exit_code = self.execute_line_inner(else_body);
-                    if self.last_exit_code == builtins::EXIT_SIGNAL {
+                    if builtins::is_exit_signal(self.last_exit_code) {
                         let _ = self.line_editor.sync_history();
                         return true;
                     }
@@ -428,7 +428,7 @@ impl Shell {
                 unsafe { std::env::set_var(key, &env_val) };
                 self.last_exit_code = self.execute_line_inner(cmd);
                 unsafe { std::env::remove_var(key) };
-                if self.last_exit_code == builtins::EXIT_SIGNAL {
+                if builtins::is_exit_signal(self.last_exit_code) {
                     let _ = self.line_editor.sync_history();
                     return true;
                 }
@@ -486,7 +486,8 @@ impl Shell {
 
             // Regular builtins
             if let Some(code) = builtins::try_builtin(&tokens) {
-                if code == builtins::EXIT_SIGNAL {
+                if builtins::is_exit_signal(code) {
+                    self.last_exit_code = code; // preserve encoded exit code for run_command
                     let _ = self.line_editor.sync_history();
                     return true;
                 }
@@ -683,7 +684,11 @@ impl Shell {
     /// Used by `-c` mode so all shell features (`;`, `&&`, loops, builtins) work.
     pub fn run_command(&mut self, input: &str) -> i32 {
         self.handle_input(input);
-        self.last_exit_code
+        if builtins::is_exit_signal(self.last_exit_code) {
+            builtins::exit_code_from_signal(self.last_exit_code)
+        } else {
+            self.last_exit_code
+        }
     }
 
     /// Set a positional parameter ($1, $2, ...) used by `-c` script mode.
@@ -727,10 +732,7 @@ impl Shell {
         }
 
         if let Some(code) = builtins::try_builtin(&tokens) {
-            if code == builtins::EXIT_SIGNAL {
-                return builtins::EXIT_SIGNAL;
-            }
-            return code;
+            return code; // propagates exit signal (with embedded exit code) to callers
         }
 
         // Use token-based pipeline building (no join→re-parse)
