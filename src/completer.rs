@@ -179,7 +179,7 @@ impl Completer for OxshCompleter {
                 || partial.starts_with('.')
                 || partial.starts_with('~')
             {
-                return complete_paths(partial, span, false);
+                return complete_paths(partial, span, false, &self.matcher);
             }
             self.complete_commands(partial, span)
         } else {
@@ -188,7 +188,7 @@ impl Completer for OxshCompleter {
 
             // cd / pushd: directories only
             if matches!(first_word, "cd" | "pushd" | "mkdir") && words.len() == 1 {
-                return complete_paths(partial, span, true);
+                return complete_paths(partial, span, true, &self.matcher);
             }
 
             // Subcommand completion for known tools (only after the base command)
@@ -209,7 +209,7 @@ impl Completer for OxshCompleter {
                     }
             }
 
-            complete_paths(partial, span, false)
+            complete_paths(partial, span, false, &self.matcher)
         }
     }
 }
@@ -398,7 +398,7 @@ fn read_cargo_targets(subcmd: &str) -> Vec<String> {
     names
 }
 
-fn complete_paths(partial: &str, span: Span, dirs_only: bool) -> Vec<Suggestion> {
+fn complete_paths(partial: &str, span: Span, dirs_only: bool, matcher: &SkimMatcherV2) -> Vec<Suggestion> {
     let expanded = shellexpand::tilde(partial).to_string();
 
     let (dir, prefix) = match expanded.rfind('/') {
@@ -416,8 +416,6 @@ fn complete_paths(partial: &str, span: Span, dirs_only: bool) -> Vec<Suggestion>
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Vec::new();
     };
-
-    let matcher = SkimMatcherV2::default();
     let mut scored: Vec<(String, bool, i64)> = entries
         .flatten()
         .filter_map(|e| {

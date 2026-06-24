@@ -46,8 +46,8 @@ pub struct OxshPrompt {
     pub last_exit_code: i32,
     pub cmd_duration_ms: u128,
     pub context: ShellContext,
-    left_format: String,
-    right_format: String,
+    left_tokens: Vec<String>,
+    right_tokens: Vec<String>,
 }
 
 impl OxshPrompt {
@@ -61,8 +61,8 @@ impl OxshPrompt {
             last_exit_code,
             cmd_duration_ms,
             context,
-            left_format: prompt_config.left.clone(),
-            right_format: prompt_config.right.clone(),
+            left_tokens: parse_format_tokens(&prompt_config.left),
+            right_tokens: parse_format_tokens(&prompt_config.right),
         }
     }
 
@@ -256,8 +256,7 @@ fn render_segments(segments: &[Segment]) -> String {
 
 impl Prompt for OxshPrompt {
     fn render_prompt_left(&self) -> Cow<'_, str> {
-        let tokens = parse_format_tokens(&self.left_format);
-        let segments: Vec<Segment> = tokens.iter()
+        let segments: Vec<Segment> = self.left_tokens.iter()
             .filter_map(|t| self.evaluate_token(t))
             .collect();
         let mut prompt = render_segments(&segments);
@@ -266,8 +265,7 @@ impl Prompt for OxshPrompt {
     }
 
     fn render_prompt_right(&self) -> Cow<'_, str> {
-        let tokens = parse_format_tokens(&self.right_format);
-        let segments: Vec<Segment> = tokens.iter()
+        let segments: Vec<Segment> = self.right_tokens.iter()
             .filter_map(|t| self.evaluate_token(t))
             .collect();
         if segments.is_empty() {
