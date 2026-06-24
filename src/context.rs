@@ -170,15 +170,14 @@ fn detect_git_branch(dir: &Path) -> Option<String> {
 }
 
 fn detect_k8s_context() -> Option<String> {
+    use std::io::{BufRead, BufReader};
     let kubeconfig = env::var("KUBECONFIG").ok().or_else(|| {
         dirs::home_dir().map(|h| h.join(".kube/config").to_string_lossy().to_string())
     })?;
-    if !Path::new(&kubeconfig).exists() {
-        return None;
-    }
-    let content = std::fs::read_to_string(&kubeconfig).ok()?;
-    for line in content.lines() {
-        let trimmed = line.trim();
+    // Stream line-by-line with early exit (P7) — kubeconfigs can be large.
+    let file = std::fs::File::open(&kubeconfig).ok()?;
+    for line in BufReader::new(file).lines().map_while(Result::ok) {
+        let trimmed = line.trim().to_owned();
         if let Some(ctx) = trimmed.strip_prefix("current-context:") {
             return Some(ctx.trim().to_string());
         }

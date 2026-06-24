@@ -162,6 +162,8 @@ pub struct Shell {
     last_command: String,
     /// Cached list of PATH commands for typo suggestions (populated by main via seed)
     known_commands: Vec<String>,
+    /// Cached value of OXSH_MAX_ITERATIONS (P8: avoid env::var on every while-loop tick)
+    max_iterations: usize,
 }
 
 impl Shell {
@@ -176,6 +178,10 @@ impl Shell {
         } else {
             vec![cwd_str]
         };
+        let max_iterations = std::env::var("OXSH_MAX_ITERATIONS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1_000_000);
         Self {
             aliases: config.aliases.clone(),
             config,
@@ -189,6 +195,7 @@ impl Shell {
             dir_index: 0,
             last_command: String::new(),
             known_commands: Vec::new(),
+            max_iterations,
         }
     }
 
@@ -364,10 +371,7 @@ impl Shell {
                     }
                     continue;
                 }
-                let max_iter: usize = std::env::var("OXSH_MAX_ITERATIONS")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(1_000_000);
+                let max_iter = self.max_iterations;
                 let mut iterations = 0usize;
                 loop {
                     let cond_code = self.execute_line_inner(&while_loop.condition);
