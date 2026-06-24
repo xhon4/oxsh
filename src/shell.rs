@@ -41,6 +41,45 @@ fn suggest_correction(cmd: &str, known_commands: &[String]) -> Option<String> {
     best.map(|(name, _)| name.to_string())
 }
 
+/// Expand subshells, tokenize, expand variables and aliases, braces, and globs.
+/// Extracted from the two identical expansion pipelines in `handle_input` and
+/// `execute_line_inner` (M5). Returns `(tokens, quoted_flags)`; empty tokens
+/// means nothing to execute.
+fn expand_and_resolve(
+    segment: &str,
+    shell_vars: &scripting::ShellVars,
+    aliases: &HashMap<String, String>,
+    glob: bool,
+) -> (Vec<String>, Vec<bool>) {
+    let expanded = parser::expand_subshells(segment);
+    let (mut tokens, mut quoted_flags) = parser::tokenize_with_quote_flags(&expanded);
+    if tokens.is_empty() {
+        return (tokens, quoted_flags);
+    }
+    scripting::expand_shell_vars(&mut tokens, shell_vars);
+    parser::expand_vars(&mut tokens);
+    let before = tokens.len();
+    parser::resolve_alias(&mut tokens, aliases);
+    let after = tokens.len();
+    if after != before {
+        let alias_count = (after + 1).saturating_sub(before);
+        let mut new_flags = vec![false; alias_count];
+        if quoted_flags.len() > 1 {
+            new_flags.extend_from_slice(&quoted_flags[1..before.min(quoted_flags.len())]);
+        }
+        new_flags.resize(after, false);
+        quoted_flags = new_flags;
+    } else {
+        quoted_flags.resize(after, false);
+    }
+    parser::expand_braces(&mut tokens);
+    quoted_flags.resize(tokens.len(), false);
+    if glob {
+        parser::expand_globs_respecting_quotes(&mut tokens, &quoted_flags);
+    }
+    (tokens, quoted_flags)
+}
+
 pub struct Shell {
     pub config: Config,
     line_editor: Reedline,
@@ -347,40 +386,12 @@ impl Shell {
                 continue;
             }
 
-            // Expand subshells, then tokenize + expand
-            let expanded_segment = parser::expand_subshells(segment);
-            let (mut tokens, mut quoted_flags) =
-                parser::tokenize_with_quote_flags(&expanded_segment);
-            if tokens.is_empty() {
-                continue;
-            }
-            scripting::expand_shell_vars(&mut tokens, &self.shell_vars);
-            parser::expand_vars(&mut tokens);
-            // Track alias resolution: it may replace token[0] with N tokens
-            let before_alias = tokens.len();
-            parser::resolve_alias(&mut tokens, &self.aliases);
-            let after_alias = tokens.len();
-            if after_alias != before_alias {
-                // Rebuild quote flags: alias-injected tokens are unquoted,
-                // original tokens[1..] keep their flags
-                let alias_count = (after_alias + 1).saturating_sub(before_alias);
-                let mut new_flags = vec![false; alias_count];
-                if quoted_flags.len() > 1 {
-                    new_flags.extend_from_slice(
-                        &quoted_flags[1..before_alias.min(quoted_flags.len())],
-                    );
-                }
-                new_flags.resize(after_alias, false);
-                quoted_flags = new_flags;
-            } else {
-                quoted_flags.resize(after_alias, false);
-            }
-            parser::expand_braces(&mut tokens);
-            quoted_flags.resize(tokens.len(), false);
-            if self.config.shell.glob {
-                parser::expand_globs_respecting_quotes(&mut tokens, &quoted_flags);
-            }
-
+            let (tokens, _quoted_flags) = expand_and_resolve(
+                segment,
+                &self.shell_vars,
+                &self.aliases,
+                self.config.shell.glob,
+            );
             if tokens.is_empty() {
                 continue;
             }
@@ -420,22 +431,17 @@ impl Shell {
                 continue;
             }
 
+            // Save cmd name before execute_tokens takes ownership of tokens (P8).
+            let cmd_name = tokens.first().cloned().unwrap_or_default();
             // External commands — build pipeline directly from tokens to avoid
             // the join→re-parse round-trip that breaks arguments with spaces.
             self.last_exit_code = self.execute_tokens(tokens, segment);
 
             // Typo correction: suggest if command not found
-            if self.last_exit_code == 127 {
-                // We need the command name; re-tokenize just the first token from segment
-                let first_token = parser::tokenize(segment).into_iter().next();
-                if let Some(cmd) = first_token
-                    && let Some(suggestion) =
-                        suggest_correction(&cmd, &self.known_commands)
-                    {
-                        eprintln!(
-                            "\x1b[33moxsh: did you mean \x1b[1m{suggestion}\x1b[22m?\x1b[0m",
-                        );
-                    }
+            if self.last_exit_code == 127
+                && let Some(suggestion) = suggest_correction(&cmd_name, &self.known_commands)
+            {
+                eprintln!("\x1b[33moxsh: did you mean \x1b[1m{suggestion}\x1b[22m?\x1b[0m");
             }
 
             if should_skip(op, self.last_exit_code) {
@@ -644,33 +650,12 @@ impl Shell {
             return 0;
         }
 
-        let expanded = parser::expand_subshells(input);
-        let (mut tokens, mut quoted_flags) = parser::tokenize_with_quote_flags(&expanded);
-        if tokens.is_empty() {
-            return 0;
-        }
-        scripting::expand_shell_vars(&mut tokens, &self.shell_vars);
-        parser::expand_vars(&mut tokens);
-        let before = tokens.len();
-        parser::resolve_alias(&mut tokens, &self.config.aliases);
-        let after = tokens.len();
-        if after != before {
-            let alias_count = (after + 1).saturating_sub(before);
-            let mut new_flags = vec![false; alias_count];
-            if quoted_flags.len() > 1 {
-                new_flags.extend_from_slice(&quoted_flags[1..before.min(quoted_flags.len())]);
-            }
-            new_flags.resize(after, false);
-            quoted_flags = new_flags;
-        } else {
-            quoted_flags.resize(after, false);
-        }
-        parser::expand_braces(&mut tokens);
-        quoted_flags.resize(tokens.len(), false);
-        if self.config.shell.glob {
-            parser::expand_globs_respecting_quotes(&mut tokens, &quoted_flags);
-        }
-
+        let (tokens, _) = expand_and_resolve(
+            input,
+            &self.shell_vars,
+            &self.aliases,
+            self.config.shell.glob,
+        );
         if tokens.is_empty() {
             return 0;
         }
