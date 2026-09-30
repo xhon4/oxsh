@@ -10,6 +10,212 @@ fn oxsh() -> Command {
 }
 
 #[test]
+fn issue_10_preserves_quoted_and_escaped_variables() {
+    oxsh()
+        .args(["-c", "echo '$OXSH_ISSUE10_VALUE' \"$OXSH_ISSUE10_VALUE\""])
+        .env("OXSH_ISSUE10_VALUE", "secret")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("$OXSH_ISSUE10_VALUE secret"));
+
+    oxsh()
+        .args(["-c", "echo pre'$OXSH_ISSUE10_VALUE'-\"$OXSH_ISSUE10_VALUE\""])
+        .env("OXSH_ISSUE10_VALUE", "secret")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("pre$OXSH_ISSUE10_VALUE-secret"));
+
+    oxsh()
+        .args(["-c", "echo \\$OXSH_ISSUE10_VALUE"])
+        .env("OXSH_ISSUE10_VALUE", "secret")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("$OXSH_ISSUE10_VALUE"));
+}
+
+#[test]
+fn issue_10_preserves_quoted_and_expansion_produced_operators() {
+    oxsh()
+        .args(["-c", "echo '>' \\> $OXSH_ISSUE10_OPERATOR"])
+        .env("OXSH_ISSUE10_OPERATOR", ">")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("> > >"));
+}
+
+#[test]
+fn issue_10_redirects_only_on_genuine_lexical_operator() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let victim = dir.path().join("victim");
+    std::fs::write(&victim, "preserved").expect("seed victim file");
+    let victim_arg = victim.to_str().unwrap();
+
+    oxsh()
+        .current_dir(dir.path())
+        .args(["-c", &format!("printf \"%s\" '>' {victim_arg}")])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "preserved");
+
+    oxsh()
+        .current_dir(dir.path())
+        .args(["-c", &format!("printf '%s' \\> {victim_arg}")])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "preserved");
+
+    oxsh()
+        .current_dir(dir.path())
+        .args(["-c", &format!("printf \"%s\" $OXSH_ISSUE10_OPERATOR {victim_arg}")])
+        .env("OXSH_ISSUE10_OPERATOR", ">")
+        .assert()
+        .success();
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "preserved");
+
+    oxsh()
+        .current_dir(dir.path())
+        .args(["-c", "printf '%s' redirected > actual"])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read_to_string(dir.path().join("actual")).unwrap(), "redirected");
+}
+
+#[test]
+fn issue_10_private_use_characters_are_not_internal_markers() {
+    let private_use = '\u{e000}'.to_string();
+    oxsh()
+        .args(["-c", &format!("/usr/bin/printf '%s' '{private_use}'")])
+        .assert()
+        .success()
+        .stdout(predicate::eq(private_use.clone()));
+
+    oxsh()
+        .args(["-c", "/usr/bin/printf '%s' \"$OXSH_ISSUE10_PRIVATE\""])
+        .env("OXSH_ISSUE10_PRIVATE", &private_use)
+        .assert()
+        .success()
+        .stdout(predicate::eq(private_use));
+}
+
+#[test]
+fn issue_10_alias_expansion_preserves_original_pipeline_syntax() {
+    oxsh()
+        .args(["-c", "alias p='/usr/bin/printf %s'; p hello | /usr/bin/cat"])
+        .assert()
+        .success()
+        .stdout(predicate::eq("hello"));
+}
+
+#[test]
+fn issue_10_brace_expansion_preserves_following_pipeline_syntax() {
+    oxsh()
+        .args(["-c", "/usr/bin/printf '%s' {a,b} | /usr/bin/cat"])
+        .assert()
+        .success()
+        .stdout(predicate::eq("ab"));
+}
+
+#[test]
+fn issue_10_single_quoted_assignment_values_stay_literal() {
+    oxsh()
+        .args(["-c", "V='$OXSH_ISSUE10_VALUE'; /usr/bin/printf '%s' \"$V\""])
+        .env("OXSH_ISSUE10_VALUE", "secret")
+        .assert()
+        .success()
+        .stdout(predicate::eq("$OXSH_ISSUE10_VALUE"));
+
+    oxsh()
+        .args(["-c", "V='$OXSH_ISSUE10_VALUE' /usr/bin/printenv V"])
+        .env("OXSH_ISSUE10_VALUE", "secret")
+        .assert()
+        .success()
+        .stdout(predicate::eq("$OXSH_ISSUE10_VALUE\n"));
+}
+
+#[test]
+fn issue_10_substitution_operators_do_not_redirect() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let victim = dir.path().join("victim");
+    std::fs::write(&victim, "preserved").expect("seed victim file");
+    let victim_arg = victim.to_str().unwrap();
+
+    oxsh()
+        .current_dir(dir.path())
+        .args(["-c", &format!("/usr/bin/printf '%s' $(/usr/bin/printf '>') {victim_arg}")])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "preserved");
+}
+
+#[test]
+fn issue_10_substitution_output_is_not_variable_expanded_again() {
+    oxsh()
+        .args(["-c", "/usr/bin/printf '%s' \"$(/usr/bin/printf '$OXSH_ISSUE10_VALUE')\""])
+        .env("OXSH_ISSUE10_VALUE", "secret")
+        .assert()
+        .success()
+        .stdout(predicate::eq("$OXSH_ISSUE10_VALUE"));
+}
+
+#[test]
+fn issue_10_quoted_command_substitution_does_not_glob() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    std::fs::write(dir.path().join("a.txt"), "a").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "b").unwrap();
+
+    oxsh()
+        .current_dir(dir.path())
+        .args(["-c", "/usr/bin/printf '<%s>' \"$(/usr/bin/printf '*.txt')\""])
+        .assert()
+        .success()
+        .stdout(predicate::eq("<*.txt>"));
+}
+
+#[test]
+fn issue_10_quoted_backtick_substitution_does_not_glob() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    std::fs::write(dir.path().join("a.txt"), "a").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "b").unwrap();
+
+    oxsh()
+        .current_dir(dir.path())
+        .args(["-c", r#"/usr/bin/printf '<%s>' "`/usr/bin/printf '*.txt'`""#])
+        .assert()
+        .success()
+        .stdout(predicate::eq("<*.txt>"));
+}
+
+#[test]
+fn issue_10_mixed_fully_quoted_substitution_fragment_does_not_glob() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    std::fs::write(dir.path().join("xone.txt"), "x").unwrap();
+
+    oxsh()
+        .current_dir(dir.path())
+        .args(["-c", "/usr/bin/printf '<%s>' \"$(/usr/bin/printf x)\"'*.txt'"])
+        .assert()
+        .success()
+        .stdout(predicate::eq("<x*.txt>"));
+}
+
+#[test]
+fn issue_10_tilde_expansion_keeps_quoted_glob_provenance() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    std::fs::write(dir.path().join("a.txt"), "a").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "b").unwrap();
+    let expected = format!("{}/*.txt", dir.path().display());
+
+    oxsh()
+        .current_dir(dir.path())
+        .args(["-c", "/usr/bin/printf '<%s>' \"$VAR\""])
+        .env("HOME", dir.path())
+        .env("VAR", "~/*.txt")
+        .assert()
+        .success()
+        .stdout(predicate::eq(format!("<{expected}>")));
+}
+
+#[test]
 fn prints_version() {
     oxsh()
         .arg("--version")

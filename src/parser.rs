@@ -1,32 +1,113 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-/// Tokenize raw input into arguments, handling quotes and escapes.
+/// A token retains lexical syntax and the expansion behavior of each fragment.
+#[derive(Clone, Debug)]
+pub struct Word {
+    pub fragments: Vec<Fragment>,
+    pub operator: bool,
+    pub fully_quoted: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct Fragment {
+    pub text: String,
+    pub expand_vars: bool,
+}
+
+impl Word {
+    pub fn text(&self) -> String {
+        self.fragments.iter().map(|part| part.text.as_str()).collect()
+    }
+
+    pub fn literal(text: String) -> Self {
+        Self {
+            fragments: vec![Fragment {
+                text,
+                expand_vars: false,
+            }],
+            operator: false,
+            fully_quoted: false,
+        }
+    }
+}
+
+/// Tokenize raw input into arguments, handling quotes, escapes and substitutions.
+#[allow(dead_code)]
 pub fn tokenize(input: &str) -> Vec<String> {
-    let (tokens, _) = tokenize_with_quote_flags(input);
-    tokens
+    tokenize_words(input).into_iter().map(|word| word.text()).collect()
 }
 
 /// Tokenize input and also return a parallel bool vector indicating which
 /// tokens were entirely enclosed in quotes. Used to suppress glob expansion
 /// on tokens like `"*.txt"` where the user intended a literal string.
+#[allow(dead_code)]
 pub fn tokenize_with_quote_flags(input: &str) -> (Vec<String>, Vec<bool>) {
+    let words = tokenize_words(input);
+    (
+        words.iter().map(Word::text).collect(),
+        words.iter().map(|word| word.fully_quoted).collect(),
+    )
+}
+
+/// Lex input into words whose fragments carry expansion and syntax provenance.
+pub fn tokenize_words(input: &str) -> Vec<Word> {
+    let chars: Vec<char> = input.chars().collect();
     let mut tokens = Vec::new();
-    let mut quoted_flags = Vec::new();
-    let mut current = String::new();
+    let mut current = Word {
+        fragments: Vec::new(),
+        operator: false,
+        fully_quoted: false,
+    };
     let mut in_single = false;
     let mut in_double = false;
     let mut escape = false;
     let mut was_quoted = false;
     let mut has_unquoted_char = false;
+    let mut operator_eligible = true;
+    let mut i = 0;
 
-    for ch in input.chars() {
+    while i < chars.len() {
+        let ch = chars[i];
         if escape {
-            current.push(ch);
+            push_fragment(&mut current, ch, ch != '$');
             escape = false;
-            // Escaped chars are outside of quotes — token is not fully-quoted
+            operator_eligible = false;
             has_unquoted_char = true;
+            i += 1;
             continue;
+        }
+        if !in_single && ch == '$' && chars.get(i + 1) == Some(&'(') {
+            if let Some(end) = find_subshell_end(&chars, i + 2) {
+                let command: String = chars[i + 2..end].iter().collect();
+                push_text_fragment(&mut current, &run_subshell(&command), false);
+                operator_eligible = false;
+                if !in_double {
+                    has_unquoted_char = true;
+                }
+                i = end + 1;
+                continue;
+            }
+        }
+        if !in_single && ch == '`' {
+            let start = i + 1;
+            let mut end = start;
+            while end < chars.len() && chars[end] != '`' {
+                if chars[end] == '\\' {
+                    end += 1;
+                }
+                end += 1;
+            }
+            if end < chars.len() {
+                let command: String = chars[start..end].iter().collect();
+                push_text_fragment(&mut current, &run_subshell(&command), false);
+                operator_eligible = false;
+                if !in_double {
+                    has_unquoted_char = true;
+                }
+                i = end + 1;
+                continue;
+            }
         }
         match ch {
             '\\' if !in_single => {
@@ -36,34 +117,121 @@ pub fn tokenize_with_quote_flags(input: &str) -> (Vec<String>, Vec<bool>) {
             '\'' if !in_double => {
                 in_single = !in_single;
                 was_quoted = true;
+                operator_eligible = false;
             }
             '"' if !in_single => {
                 in_double = !in_double;
                 was_quoted = true;
+                operator_eligible = false;
             }
             ' ' | '\t' if !in_single && !in_double => {
-                if !current.is_empty() || was_quoted {
-                    let fully_quoted = was_quoted && !has_unquoted_char;
-                    tokens.push(std::mem::take(&mut current));
-                    quoted_flags.push(fully_quoted);
+                if !current.fragments.is_empty() || was_quoted {
+                    finish_word(
+                        &mut tokens,
+                        &mut current,
+                        was_quoted && !has_unquoted_char,
+                        operator_eligible,
+                    );
                     was_quoted = false;
                     has_unquoted_char = false;
+                    operator_eligible = true;
                 }
             }
             _ => {
                 if !in_single && !in_double {
                     has_unquoted_char = true;
                 }
-                current.push(ch);
+                push_fragment(&mut current, ch, !in_single);
             }
         }
+        i += 1;
     }
-    if !current.is_empty() || was_quoted {
-        let fully_quoted = was_quoted && !has_unquoted_char;
-        tokens.push(current);
-        quoted_flags.push(fully_quoted);
+    if !current.fragments.is_empty() || was_quoted {
+        finish_word(
+            &mut tokens,
+            &mut current,
+            was_quoted && !has_unquoted_char,
+            operator_eligible,
+        );
     }
-    (tokens, quoted_flags)
+    tokens
+}
+
+fn push_fragment(word: &mut Word, ch: char, expand_vars: bool) {
+    if let Some(last) = word
+        .fragments
+        .last_mut()
+        .filter(|last| last.expand_vars == expand_vars)
+    {
+        last.text.push(ch);
+    } else {
+        word.fragments.push(Fragment {
+            text: ch.to_string(),
+            expand_vars,
+        });
+    }
+}
+
+fn push_text_fragment(word: &mut Word, text: &str, expand_vars: bool) {
+    if text.is_empty() {
+        return;
+    }
+    if let Some(last) = word
+        .fragments
+        .last_mut()
+        .filter(|last| last.expand_vars == expand_vars)
+    {
+        last.text.push_str(text);
+    } else {
+        word.fragments.push(Fragment {
+            text: text.to_string(),
+            expand_vars,
+        });
+    }
+}
+
+fn finish_word(
+    tokens: &mut Vec<Word>,
+    word: &mut Word,
+    fully_quoted: bool,
+    operator_eligible: bool,
+) {
+    let text = word.text();
+    tokens.push(Word {
+        fragments: std::mem::take(&mut word.fragments),
+        operator: operator_eligible && is_shell_operator(&text),
+        fully_quoted,
+    });
+    word.operator = false;
+    word.fully_quoted = false;
+}
+
+fn find_subshell_end(chars: &[char], start: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut single = false;
+    let mut double = false;
+    let mut i = start;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' if !single => i += 1,
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '(' if !single && !double => depth += 1,
+            ')' if !single && !double => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn is_shell_operator(token: &str) -> bool {
+    matches!(token, "|" | "&" | "<" | ">" | ">>" | "2>" | "2>>" | "2>&1")
 }
 
 /// Expand a leading `~` to the home directory.
@@ -81,10 +249,37 @@ pub fn expand_vars(tokens: &mut [String]) {
 
 /// Resolve aliases with recursion support and a depth limit to prevent hangs
 /// from self-referencing aliases like `alias ls='ls --color'`.
+#[allow(dead_code)]
 pub fn resolve_alias(tokens: &mut Vec<String>, aliases: &HashMap<String, String>) {
     resolve_alias_depth(tokens, aliases, 0);
 }
 
+/// Resolve aliases without discarding syntax or fragment metadata.
+pub fn resolve_word_aliases(words: &mut Vec<Word>, aliases: &HashMap<String, String>) {
+    resolve_word_aliases_depth(words, aliases, 0);
+}
+
+fn resolve_word_aliases_depth(
+    words: &mut Vec<Word>,
+    aliases: &HashMap<String, String>,
+    depth: usize,
+) {
+    if words.is_empty() || depth > 16 {
+        return;
+    }
+    let name = words[0].text();
+    if let Some(expansion) = aliases.get(&name) {
+        let mut expanded = tokenize_words(expansion);
+        let self_ref = expanded.first().is_some_and(|word| word.text() == name);
+        expanded.extend(words.drain(1..));
+        *words = expanded;
+        if !self_ref {
+            resolve_word_aliases_depth(words, aliases, depth + 1);
+        }
+    }
+}
+
+#[allow(dead_code)]
 fn resolve_alias_depth(
     tokens: &mut Vec<String>,
     aliases: &HashMap<String, String>,
@@ -123,21 +318,19 @@ pub enum Redirect {
     Append(String),
 }
 
-/// Parse a full input line into a pipeline of commands.
-/// Takes pre-tokenized args to avoid re-parsing expanded tokens as raw text.
-pub fn parse_pipeline_from_tokens(token_groups: Vec<Vec<String>>) -> Vec<Command> {
+/// Parse commands while retaining each word's original lexical metadata.
+pub fn parse_pipeline_from_words(token_groups: Vec<Vec<Word>>) -> Vec<Command> {
     token_groups
         .into_iter()
-        
-        .map(|mut tokens| {
-            let background = tokens.last().map(|t| t == "&").unwrap_or(false);
+        .map(|mut words| {
+            let background = words.last().is_some_and(|word| word.operator && word.text() == "&");
             if background {
-                tokens.pop();
+                words.pop();
             }
             let (stdin_redirect, stdout_redirect, stderr_redirect, merge_stderr) =
-                extract_redirects(&mut tokens);
+                extract_word_redirects(&mut words);
             Command {
-                args: tokens,
+                args: words.into_iter().map(|word| word.text()).collect(),
                 stdin_redirect,
                 stdout_redirect,
                 stderr_redirect,
@@ -163,12 +356,12 @@ pub fn parse_pipeline(input: &str) -> Vec<Command> {
             (trimmed, false)
         };
 
-        let mut tokens = tokenize(cmd_str);
+        let mut tokens = tokenize_words(cmd_str);
         let (stdin_redirect, stdout_redirect, stderr_redirect, merge_stderr) =
-            extract_redirects(&mut tokens);
+            extract_word_redirects(&mut tokens);
 
         commands.push(Command {
-            args: tokens,
+            args: tokens.into_iter().map(|word| word.text()).collect(),
             stdin_redirect,
             stdout_redirect,
             stderr_redirect,
@@ -214,8 +407,31 @@ fn split_on_pipes(input: &str) -> Vec<&str> {
 }
 
 /// Extract redirect operators from tokens: <, >, >>, 2>, 2>>, 2>&1
+#[cfg(test)]
 fn extract_redirects(
     tokens: &mut Vec<String>,
+) -> (Option<String>, Option<Redirect>, Option<Redirect>, bool) {
+    let mut words: Vec<Word> = tokens
+        .drain(..)
+        .map(|text| {
+            let operator = is_shell_operator(&text);
+            Word {
+                fragments: vec![Fragment {
+                    text,
+                    expand_vars: false,
+                }],
+                operator,
+                fully_quoted: false,
+            }
+        })
+        .collect();
+    let result = extract_word_redirects(&mut words);
+    *tokens = words.into_iter().map(|word| word.text()).collect();
+    result
+}
+
+fn extract_word_redirects(
+    words: &mut Vec<Word>,
 ) -> (Option<String>, Option<Redirect>, Option<Redirect>, bool) {
     let mut stdin = None;
     let mut stdout = None;
@@ -223,26 +439,32 @@ fn extract_redirects(
     let mut merge_stderr = false;
     let mut i = 0;
 
-    while i < tokens.len() {
-        let token = &tokens[i];
-        if token == "2>&1" {
+    while i < words.len() {
+        let token = words[i].text();
+        let is_operator = words[i].operator;
+        let remove = if is_operator && token == "2>&1" {
             merge_stderr = true;
-            tokens.remove(i);
-        } else if token == "<" && i + 1 < tokens.len() {
-            stdin = Some(tokens[i + 1].clone());
-            tokens.drain(i..=i + 1);
-        } else if token == ">>" && i + 1 < tokens.len() {
-            stdout = Some(Redirect::Append(tokens[i + 1].clone()));
-            tokens.drain(i..=i + 1);
-        } else if token == ">" && i + 1 < tokens.len() {
-            stdout = Some(Redirect::Truncate(tokens[i + 1].clone()));
-            tokens.drain(i..=i + 1);
-        } else if token == "2>" && i + 1 < tokens.len() {
-            stderr = Some(Redirect::Truncate(tokens[i + 1].clone()));
-            tokens.drain(i..=i + 1);
-        } else if token == "2>>" && i + 1 < tokens.len() {
-            stderr = Some(Redirect::Append(tokens[i + 1].clone()));
-            tokens.drain(i..=i + 1);
+            1
+        } else if is_operator && token == "<" && i + 1 < words.len() {
+            stdin = Some(words[i + 1].text());
+            2
+        } else if is_operator && token == ">>" && i + 1 < words.len() {
+            stdout = Some(Redirect::Append(words[i + 1].text()));
+            2
+        } else if is_operator && token == ">" && i + 1 < words.len() {
+            stdout = Some(Redirect::Truncate(words[i + 1].text()));
+            2
+        } else if is_operator && token == "2>" && i + 1 < words.len() {
+            stderr = Some(Redirect::Truncate(words[i + 1].text()));
+            2
+        } else if is_operator && token == "2>>" && i + 1 < words.len() {
+            stderr = Some(Redirect::Append(words[i + 1].text()));
+            2
+        } else {
+            0
+        };
+        if remove > 0 {
+            words.drain(i..i + remove);
         } else {
             i += 1;
         }
@@ -292,12 +514,45 @@ fn contains_glob_chars(s: &str) -> bool {
 /// Expand brace expressions in tokens: `{a,b,c}` → three tokens,
 /// `{1..5}` → five tokens, `{a..e}` → five tokens.
 /// Braces inside single-quoted strings are not expanded.
+#[allow(dead_code)]
 pub fn expand_braces(tokens: &mut Vec<String>) {
     let mut result = Vec::with_capacity(tokens.len());
     for token in tokens.drain(..) {
         result.extend(expand_brace_token(&token));
     }
     *tokens = result;
+}
+
+/// Expand brace words while marking generated words as data, not syntax.
+pub fn expand_brace_words(words: &mut Vec<Word>) {
+    let mut result = Vec::with_capacity(words.len());
+    for word in words.drain(..) {
+        let text = word.text();
+        let expanded = expand_brace_token(&text);
+        if expanded.len() == 1 && expanded[0] == text {
+            result.push(word);
+        } else {
+            result.extend(expanded.into_iter().map(Word::literal));
+        }
+    }
+    *words = result;
+}
+
+/// Expand globs without promoting generated paths to shell syntax.
+pub fn expand_glob_words(words: &mut Vec<Word>) {
+    let mut result = Vec::with_capacity(words.len());
+    for word in words.drain(..) {
+        if word.fully_quoted { result.push(word); continue; }
+        let text = word.text();
+        let mut expanded = vec![text.clone()];
+        expand_globs_respecting_quotes(&mut expanded, &[false]);
+        if expanded.len() == 1 && expanded[0] == text {
+            result.push(word);
+        } else {
+            result.extend(expanded.into_iter().map(Word::literal));
+        }
+    }
+    *words = result;
 }
 
 fn expand_brace_token(token: &str) -> Vec<String> {
@@ -415,6 +670,7 @@ fn try_range_expand(inner: &str) -> Option<Vec<String>> {
 /// context so that an apostrophe inside double quotes does not wrongly disable
 /// expansion. Escaped characters inside `$(...)` are skipped, not counted toward
 /// the parenthesis depth.
+#[allow(dead_code)]
 pub fn expand_subshells(input: &str) -> String {
     // Fast-path: avoid Vec<char> allocation when no expansion markers exist (P4).
     if !input.contains('$') && !input.contains('`') {

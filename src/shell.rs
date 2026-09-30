@@ -41,43 +41,45 @@ fn suggest_correction(cmd: &str, known_commands: &[String]) -> Option<String> {
     best.map(|(name, _)| name.to_string())
 }
 
-/// Expand subshells, tokenize, expand variables and aliases, braces, and globs.
-/// Extracted from the two identical expansion pipelines in `handle_input` and
-/// `execute_line_inner` (M5). Returns `(tokens, quoted_flags)`; empty tokens
-/// means nothing to execute.
+fn expand_word_fragments(words: &mut [parser::Word], vars: &scripting::ShellVars) {
+    for word in words {
+        for fragment in &mut word.fragments {
+            if fragment.expand_vars {
+                fragment.text = scripting::expand_shell_var(&fragment.text, vars);
+            }
+        }
+        let mut value = vec![word.text()];
+        parser::expand_vars(&mut value);
+        let expanded = value.pop().unwrap_or_default();
+        if expanded != word.text() {
+            word.fragments = vec![parser::Fragment {
+                text: expanded,
+                expand_vars: false,
+            }];
+        }
+    }
+}
+
+fn expand_assignment_value(raw: &str, vars: &scripting::ShellVars) -> String {
+    let mut words = parser::tokenize_words(raw);
+    expand_word_fragments(&mut words, vars);
+    words.iter().map(parser::Word::text).collect::<Vec<_>>().join(" ")
+}
+
+/// Expand lexical fragments and word transformations without losing provenance.
 fn expand_and_resolve(
     segment: &str,
     shell_vars: &scripting::ShellVars,
     aliases: &HashMap<String, String>,
     glob: bool,
-) -> (Vec<String>, Vec<bool>) {
-    let expanded = parser::expand_subshells(segment);
-    let (mut tokens, mut quoted_flags) = parser::tokenize_with_quote_flags(&expanded);
-    if tokens.is_empty() {
-        return (tokens, quoted_flags);
-    }
-    scripting::expand_shell_vars(&mut tokens, shell_vars);
-    parser::expand_vars(&mut tokens);
-    let before = tokens.len();
-    parser::resolve_alias(&mut tokens, aliases);
-    let after = tokens.len();
-    if after != before {
-        let alias_count = (after + 1).saturating_sub(before);
-        let mut new_flags = vec![false; alias_count];
-        if quoted_flags.len() > 1 {
-            new_flags.extend_from_slice(&quoted_flags[1..before.min(quoted_flags.len())]);
-        }
-        new_flags.resize(after, false);
-        quoted_flags = new_flags;
-    } else {
-        quoted_flags.resize(after, false);
-    }
-    parser::expand_braces(&mut tokens);
-    quoted_flags.resize(tokens.len(), false);
-    if glob {
-        parser::expand_globs_respecting_quotes(&mut tokens, &quoted_flags);
-    }
-    (tokens, quoted_flags)
+) -> Vec<parser::Word> {
+    let mut words = parser::tokenize_words(segment);
+    if words.is_empty() { return words; }
+    expand_word_fragments(&mut words, shell_vars);
+    parser::resolve_word_aliases(&mut words, aliases);
+    parser::expand_brace_words(&mut words);
+    if glob { parser::expand_glob_words(&mut words); }
+    words
 }
 
 /// Returns true if `input` contains `!!` or `!$` outside of single or double quotes.
@@ -421,12 +423,9 @@ impl Shell {
             }
 
             // Variable assignment: VAR=value or env-prefix VAR=val cmd
-            if let Some((key, val, cmd)) = scripting::parse_env_prefix(segment) {
+            if let Some((key, raw_val, cmd)) = scripting::parse_env_prefix_raw(segment) {
                 // VAR=val cmd — run `cmd` with KEY=val in its environment only.
-                let mut vt = vec![val.to_string()];
-                scripting::expand_shell_vars(&mut vt, &self.shell_vars);
-                parser::expand_vars(&mut vt);
-                let env_val = scripting::strip_quotes(&vt[0]).to_string();
+                let env_val = expand_assignment_value(raw_val, &self.shell_vars);
                 // SAFETY: REPL runs on main thread; PATH scanner was joined before
                 // the loop; stdin-writer threads are joined per-command (M8).
                 let prev_env = std::env::var(key).ok();
@@ -446,12 +445,7 @@ impl Shell {
                 continue;
             } else if let Some((key, raw_val)) = scripting::is_var_assignment(segment) {
                 // Pure assignment: VAR=value — set in shell variable table.
-                let expanded_val = parser::expand_subshells(raw_val);
-                let mut val_tokens = parser::tokenize(&expanded_val);
-                scripting::expand_shell_vars(&mut val_tokens, &self.shell_vars);
-                parser::expand_vars(&mut val_tokens);
-                let final_val = val_tokens.join(" ");
-                let final_val = scripting::strip_quotes(&final_val).to_string();
+                let final_val = expand_assignment_value(raw_val, &self.shell_vars);
                 self.shell_vars.set(key, &final_val);
                 self.last_exit_code = 0;
                 if should_skip(op, self.last_exit_code) {
@@ -460,12 +454,13 @@ impl Shell {
                 continue;
             }
 
-            let (tokens, quoted_flags) = expand_and_resolve(
+            let words = expand_and_resolve(
                 segment,
                 &self.shell_vars,
                 &self.aliases,
                 self.config.shell.glob,
             );
+            let tokens: Vec<String> = words.iter().map(parser::Word::text).collect();
             if tokens.is_empty() {
                 continue;
             }
@@ -510,7 +505,7 @@ impl Shell {
             let cmd_name = tokens.first().cloned().unwrap_or_default();
             // External commands — build pipeline directly from tokens to avoid
             // the join→re-parse round-trip that breaks arguments with spaces.
-            self.last_exit_code = self.execute_tokens(tokens, quoted_flags, segment);
+            self.last_exit_code = self.execute_tokens(words);
 
             // Typo correction: suggest if command not found
             if self.last_exit_code == 127
@@ -529,30 +524,16 @@ impl Shell {
         false
     }
 
-    /// Execute a pre-expanded, pre-tokenized set of tokens as a pipeline.
-    ///
-    /// This is the fix for the join→re-parse bug: instead of doing
-    ///   `tokens.join(" ")` → `parse_pipeline(string)`
-    /// we split the already-expanded tokens on pipe markers and build
-    /// Commands directly, preserving arguments with spaces.
-    fn execute_tokens(&self, tokens: Vec<String>, quoted_flags: Vec<bool>, _original_segment: &str) -> i32 {
-        // Split tokens into pipe stages on "|" token boundaries.
-        // Redirect tokens (>, >>, <, 2>, 2>>, 2>&1) are handled per-stage.
-        let stages = split_tokens_on_pipes(tokens, &quoted_flags);
-
-        // If there's only one stage and no pipe was present, we can use the fast path.
-        // For multi-stage pipelines we build Commands directly from token groups.
-        let commands = parser::parse_pipeline_from_tokens(stages);
+    /// Execute lexed words without re-parsing expansion results as shell source.
+    fn execute_tokens(&self, words: Vec<parser::Word>) -> i32 {
+        let stages = split_words_on_pipes(words);
+        let commands = parser::parse_pipeline_from_words(stages);
 
         if commands.is_empty() {
             // Fallback: shouldn't happen, but if tokens were empty just no-op
             return 0;
         }
 
-        // If the pipeline has a single command and it has no structured component,
-        // but the original segment had subshell expansions in it that produced
-        // a pipeline string (e.g. CMD=$(echo "a | b")), fall back to string parse.
-        // In practice this is rare; the token path handles 99% of cases correctly.
         executor::execute_pipeline(commands)
     }
 
@@ -709,11 +690,8 @@ impl Shell {
     /// This path goes through full expansion + token-based pipeline building.
     fn execute_line_inner(&mut self, input: &str) -> i32 {
         // Variable assignment: env-prefix first, then pure assignment
-        if let Some((key, val, cmd)) = scripting::parse_env_prefix(input) {
-            let mut vt = vec![val.to_string()];
-            scripting::expand_shell_vars(&mut vt, &self.shell_vars);
-            parser::expand_vars(&mut vt);
-            let env_val = scripting::strip_quotes(&vt[0]).to_string();
+        if let Some((key, raw_val, cmd)) = scripting::parse_env_prefix_raw(input) {
+            let env_val = expand_assignment_value(raw_val, &self.shell_vars);
             // SAFETY: see handle_input — REPL main thread, no concurrent env readers.
             let prev_env = std::env::var(key).ok();
             unsafe { std::env::set_var(key, &env_val) };
@@ -724,22 +702,18 @@ impl Shell {
             }
             return code;
         } else if let Some((key, raw_val)) = scripting::is_var_assignment(input) {
-            let expanded_val = parser::expand_subshells(raw_val);
-            let mut val_tokens = parser::tokenize(&expanded_val);
-            scripting::expand_shell_vars(&mut val_tokens, &self.shell_vars);
-            parser::expand_vars(&mut val_tokens);
-            let final_val = val_tokens.join(" ");
-            let final_val = scripting::strip_quotes(&final_val).to_string();
+            let final_val = expand_assignment_value(raw_val, &self.shell_vars);
             self.shell_vars.set(key, &final_val);
             return 0;
         }
 
-        let (tokens, quoted_flags) = expand_and_resolve(
+        let words = expand_and_resolve(
             input,
             &self.shell_vars,
             &self.aliases,
             self.config.shell.glob,
         );
+        let tokens: Vec<String> = words.iter().map(parser::Word::text).collect();
         if tokens.is_empty() {
             return 0;
         }
@@ -749,8 +723,8 @@ impl Shell {
         }
 
         // Use token-based pipeline building (no join→re-parse)
-        let stages = split_tokens_on_pipes(tokens, &quoted_flags);
-        let commands = parser::parse_pipeline_from_tokens(stages);
+        let stages = split_words_on_pipes(words);
+        let commands = parser::parse_pipeline_from_words(stages);
         executor::execute_pipeline(commands)
     }
 }
@@ -782,19 +756,16 @@ fn explain_command(cmd: &str) {
     }
 }
 
-/// Split a token list into pipeline stages on bare `|` tokens.
-/// `quoted_flags[i]` being true means token i was quoted — such a `|` is
-/// treated as a literal character, not a pipe separator.
-fn split_tokens_on_pipes(tokens: Vec<String>, quoted_flags: &[bool]) -> Vec<Vec<String>> {
-    let mut stages: Vec<Vec<String>> = Vec::new();
-    let mut current: Vec<String> = Vec::new();
+/// Split stages only at pipe words that were lexed as shell operators.
+fn split_words_on_pipes(words: Vec<parser::Word>) -> Vec<Vec<parser::Word>> {
+    let mut stages: Vec<Vec<parser::Word>> = Vec::new();
+    let mut current: Vec<parser::Word> = Vec::new();
 
-    for (i, token) in tokens.into_iter().enumerate() {
-        let is_quoted = quoted_flags.get(i).copied().unwrap_or(false);
-        if token == "|" && !is_quoted {
+    for word in words {
+        if word.operator && word.text() == "|" {
             stages.push(std::mem::take(&mut current));
         } else {
-            current.push(token);
+            current.push(word);
         }
     }
     stages.push(current);

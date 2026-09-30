@@ -65,6 +65,7 @@ pub fn is_var_assignment(input: &str) -> Option<(&str, &str)> {
 ///
 /// Returns `Some((key, value, command))` when a command follows the assignment.
 /// Returns `None` for pure assignments (`FOO=bar`) so the caller handles those.
+#[allow(dead_code)]
 pub fn parse_env_prefix(input: &str) -> Option<(&str, &str, &str)> {
     let (key, raw_val) = is_var_assignment(input)?;
 
@@ -88,8 +89,25 @@ pub fn parse_env_prefix(input: &str) -> Option<(&str, &str, &str)> {
     Some((key, val, cmd))
 }
 
+/// Parse an environment prefix while retaining the RHS quote syntax for expansion.
+pub fn parse_env_prefix_raw(input: &str) -> Option<(&str, &str, &str)> {
+    let (key, raw_val) = is_var_assignment(input)?;
+    if raw_val.starts_with('"') || raw_val.starts_with('\'') {
+        let quote = raw_val.as_bytes()[0] as char;
+        let close = raw_val[1..].find(quote)? + 1;
+        let after = raw_val[close + 1..].trim_start();
+        if after.is_empty() { return None; }
+        return Some((key, &raw_val[..=close], after));
+    }
+    let space = raw_val.find(' ')?;
+    let value = &raw_val[..space];
+    let command = raw_val[space + 1..].trim_start();
+    if command.is_empty() { None } else { Some((key, value, command)) }
+}
+
 /// Strip surrounding quotes from an already-expanded value string.
 /// Call this after subshell/variable expansion if the value came from a literal.
+#[allow(dead_code)]
 pub fn strip_quotes(val: &str) -> &str {
     val.strip_prefix('"')
         .and_then(|v| v.strip_suffix('"'))
@@ -108,6 +126,12 @@ pub fn strip_quotes(val: &str) -> &str {
 ///   $*  all positional parameters as single word (same as $@)
 ///   $!  last background process PID (stored in shell var "!")
 ///   $1..$9  positional parameters
+pub fn expand_shell_var(input: &str, vars: &ShellVars) -> String {
+    let mut token = vec![input.to_string()];
+    expand_shell_vars(&mut token, vars);
+    token.pop().unwrap_or_default()
+}
+
 pub fn expand_shell_vars(tokens: &mut [String], vars: &ShellVars) {
     for token in tokens.iter_mut() {
         if !token.contains('$') {
