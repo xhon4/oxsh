@@ -1,8 +1,9 @@
-# oxsh shell configuration
-# https://github.com/oxsh — next-gen hybrid shell
+# oxsh shell configuration — Linux/macOS
+# Edit this file to customize your shell.
+# Reload with: source  (or just: reload)
 
 on_startup = [
-    "fastfetch",
+    # "fastfetch",
 ]
 
 [shell]
@@ -24,9 +25,7 @@ prepend = [
     "~/.cargo/bin",
     "~/.local/bin",
 ]
-scan_dirs = [
-    "~/.config/alacritty/zsh/helpers",
-]
+scan_dirs = []
 
 [aliases]
 ls = "eza --icons --group-directories-first"
@@ -36,14 +35,8 @@ cat = "bat --style=plain"
 ".." = "cd .."
 "..." = "cd ../.."
 grep = "grep --color=auto"
-update = "sudo pacman -Syu"
 # Structured pipeline shortcuts
 jq = "from-json"
-pods = "kubectl get pods -o json"
 
 [env]
 EDITOR = "nvim"
-RADV_PERFTEST = "aco,ngg"
-AMD_VULKAN_ICD = "RADV"
-mesa_glthread = "true"
-MESA_GL_VERSION_OVERRIDE = "4.6"

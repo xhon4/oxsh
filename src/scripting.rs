@@ -395,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "ISSUE #33 (IN3): $# and ${#} must agree; currently $# -> \"0\" but ${#} -> \"\"."]
+    #[ignore = "Known limitation (IN3): $# and ${#} must agree; currently $# -> \"0\" but ${#} -> \"\"."]
     fn braced_and_unbraced_specials_agree() {
         let v = ShellVars::new();
         assert_eq!(expand("$#", &v), expand("${#}", &v));
@@ -456,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "ISSUE #35 (EC-Quote): for items should respect quotes; \
+    #[ignore = "Known limitation (EC-Quote): for items should respect quotes; \
                 'for f in \"a b\" c' must yield items [\"a b\", \"c\"]."]
     fn for_items_respect_quotes() {
         let f = parse_for_loop("for f in \"a b\" c; do echo; done").unwrap();
@@ -464,7 +464,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "ISSUE #34 (IN1): if should accept ' then ' like for/while accept ' do '."]
+    #[ignore = "Known limitation (IN1): if should accept ' then ' like for/while accept ' do '."]
     fn if_accepts_bare_then() {
         assert!(parse_if("if c then x fi").is_some());
     }

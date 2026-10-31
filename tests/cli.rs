@@ -49,7 +49,7 @@ fn empty_while_condition_errors_instead_of_looping() {
 #[test]
 fn structured_stage_reports_missing_redirect_file() {
     // A structured stage reading a missing file must error, not silently feed
-    // empty input downstream (#15).
+    // empty input downstream.
     oxsh()
         .args(["-c", "to-table < /nonexistent/oxsh-test-file | cat"])
         .assert()
@@ -67,7 +67,7 @@ fn for_loop_without_semicolons_works() {
         .stdout(predicate::str::contains("1").and(predicate::str::contains("3")));
 }
 
-// ── Semicolon control-flow syntax (relates to #19) ──
+// ── Semicolon control-flow syntax ──
 // split_chain_ops must not shred the ';' inside `; do`/`; then`/`; done`.
 
 #[test]
@@ -102,7 +102,7 @@ fn semicolon_if_else_runs_else_branch() {
 }
 
 #[test]
-#[ignore = "Known limitation (#19): a control-flow statement followed by a chain \
+#[ignore = "Known limitation: a control-flow statement followed by a chain \
             operator (e.g. `for ... done && echo ok`) is treated as a single statement, \
             so the trailing chain is not honored. Needs control-flow-aware segmentation."]
 fn control_flow_followed_by_chain_operator() {

@@ -593,7 +593,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "ISSUE #24 (E1): inside double quotes a backslash should be literal \
+    #[ignore = "Known limitation (E1): inside double quotes a backslash should be literal \
                 unless before $ ` \" \\; currently it escapes the next char and is dropped."]
     fn backslash_literal_in_double_quotes() {
         let (t, _) = tok("\"a\\nb\"");
@@ -634,13 +634,13 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "ISSUE #50 (G4): stepped ranges {1..N..step} are unsupported (returned literal)."]
+    #[ignore = "Known limitation (G4): stepped ranges {1..N..step} are unsupported (returned literal)."]
     fn brace_stepped_range() {
         assert_eq!(brace("{1..10..2}"), ["1", "3", "5", "7", "9"]);
     }
 
     #[test]
-    #[ignore = "ISSUE #50 (G4): zero-padded ranges {01..03} lose their padding."]
+    #[ignore = "Known limitation (G4): zero-padded ranges {01..03} lose their padding."]
     fn brace_zero_padded_range() {
         assert_eq!(brace("{01..03}"), ["01", "02", "03"]);
     }
