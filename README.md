@@ -108,7 +108,7 @@ Comparison operators for `where`: `eq`/`==`, `ne`/`!=`, `gt`, `lt`, `ge`, `le`, 
 
 ## 🚀 Quick Start
 
-**Requirements**: a stable Rust toolchain with edition 2024 support (install via [rustup](https://rustup.rs)).
+**Requirements**: Rust 1.88 or later (install via [rustup](https://rustup.rs)). Edition 2024 is used; 1.88 is the verified minimum (`package.rust-version`).
 
 ### Linux / macOS
 
