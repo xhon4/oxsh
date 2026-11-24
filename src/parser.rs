@@ -80,10 +80,19 @@ pub fn tokenize_words(input: &str) -> Vec<Word> {
         if !in_single && ch == '$' && chars.get(i + 1) == Some(&'(') {
             if let Some(end) = find_subshell_end(&chars, i + 2) {
                 let command: String = chars[i + 2..end].iter().collect();
-                push_text_fragment(&mut current, &run_subshell(&command), false);
+                let output = run_subshell(&command);
                 operator_eligible = false;
-                if !in_double {
+                if in_double {
+                    push_text_fragment(&mut current, &output, false);
+                } else {
                     has_unquoted_char = true;
+                    push_split_substitution(
+                        &mut tokens,
+                        &mut current,
+                        &output,
+                        &mut was_quoted,
+                        &mut has_unquoted_char,
+                    );
                 }
                 i = end + 1;
                 continue;
@@ -100,10 +109,19 @@ pub fn tokenize_words(input: &str) -> Vec<Word> {
             }
             if end < chars.len() {
                 let command: String = chars[start..end].iter().collect();
-                push_text_fragment(&mut current, &run_subshell(&command), false);
+                let output = run_subshell(&command);
                 operator_eligible = false;
-                if !in_double {
+                if in_double {
+                    push_text_fragment(&mut current, &output, false);
+                } else {
                     has_unquoted_char = true;
+                    push_split_substitution(
+                        &mut tokens,
+                        &mut current,
+                        &output,
+                        &mut was_quoted,
+                        &mut has_unquoted_char,
+                    );
                 }
                 i = end + 1;
                 continue;
@@ -169,6 +187,31 @@ fn push_fragment(word: &mut Word, ch: char, expand_vars: bool) {
             text: ch.to_string(),
             expand_vars,
         });
+    }
+}
+
+/// Append the output of an unquoted command substitution to the word being
+/// lexed, splitting it into fields on spaces, tabs and newlines (the default
+/// IFS), as POSIX shells do. Every resulting word is plain data: it is never
+/// recognised as an operator, so output such as `>` or `|` stays an argument.
+fn push_split_substitution(
+    tokens: &mut Vec<Word>,
+    current: &mut Word,
+    output: &str,
+    was_quoted: &mut bool,
+    has_unquoted_char: &mut bool,
+) {
+    let mut fields = output.split([' ', '\t', '\n']);
+    if let Some(first) = fields.next() {
+        push_text_fragment(current, first, false);
+    }
+    for field in fields {
+        if !current.fragments.is_empty() || *was_quoted {
+            finish_word(tokens, current, false, false);
+            *was_quoted = false;
+        }
+        *has_unquoted_char = true;
+        push_text_fragment(current, field, false);
     }
 }
 

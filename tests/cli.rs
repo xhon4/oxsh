@@ -420,3 +420,49 @@ fn partial_pipeline_consumer_does_not_hang() {
         .success()
         .stdout(predicate::str::contains("line1").and(predicate::str::contains("line2").not()));
 }
+
+// ── Unquoted command substitution is field-split, but never re-parsed as syntax ──
+
+#[test]
+fn issue_10_unquoted_command_substitution_is_field_split() {
+    oxsh()
+        .args(["-c", "/usr/bin/printf '[%s]' $(/usr/bin/printf 'a b\\tc\\nd')"])
+        .assert()
+        .success()
+        .stdout(predicate::eq("[a][b][c][d]"));
+
+    // Fields join with the surrounding word text at the edges only.
+    oxsh()
+        .args(["-c", "/usr/bin/printf '[%s]' x$(/usr/bin/printf 'a b')y"])
+        .assert()
+        .success()
+        .stdout(predicate::eq("[xa][by]"));
+
+    // Empty output produces no argument at all.
+    oxsh()
+        .args(["-c", "/usr/bin/printf '[%s]' $(true) z"])
+        .assert()
+        .success()
+        .stdout(predicate::eq("[z]"));
+}
+
+#[test]
+fn issue_10_quoted_command_substitution_is_a_single_word() {
+    oxsh()
+        .args(["-c", "/usr/bin/printf '[%s]' \"$(/usr/bin/printf 'a  b')\""])
+        .assert()
+        .success()
+        .stdout(predicate::eq("[a  b]"));
+}
+
+#[test]
+fn issue_10_split_substitution_fields_are_not_operators() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    oxsh()
+        .current_dir(dir.path())
+        .args(["-c", "/usr/bin/printf '[%s]' $(/usr/bin/printf '> victim | cat')"])
+        .assert()
+        .success()
+        .stdout(predicate::eq("[>][victim][|][cat]"));
+    assert!(!dir.path().join("victim").exists());
+}
