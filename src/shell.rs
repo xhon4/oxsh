@@ -63,7 +63,11 @@ fn expand_word_fragments(words: &mut [parser::Word], vars: &scripting::ShellVars
 fn expand_assignment_value(raw: &str, vars: &scripting::ShellVars) -> String {
     let mut words = parser::tokenize_words(raw);
     expand_word_fragments(&mut words, vars);
-    words.iter().map(parser::Word::text).collect::<Vec<_>>().join(" ")
+    words
+        .iter()
+        .map(parser::Word::text)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Expand lexical fragments and word transformations without losing provenance.
@@ -74,11 +78,17 @@ fn expand_and_resolve(
     glob: bool,
 ) -> Vec<parser::Word> {
     let mut words = parser::tokenize_words(segment);
-    if words.is_empty() { return words; }
-    expand_word_fragments(&mut words, shell_vars);
+    if words.is_empty() {
+        return words;
+    }
+    // POSIX order: alias substitution happens before word expansion, so the
+    // words an alias body contributes get `$VAR`, `${VAR}`, `~` expanded too.
     parser::resolve_word_aliases(&mut words, aliases);
+    expand_word_fragments(&mut words, shell_vars);
     parser::expand_brace_words(&mut words);
-    if glob { parser::expand_glob_words(&mut words); }
+    if glob {
+        parser::expand_glob_words(&mut words);
+    }
     words
 }
 

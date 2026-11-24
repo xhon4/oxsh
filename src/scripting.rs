@@ -96,13 +96,19 @@ pub fn parse_env_prefix_raw(input: &str) -> Option<(&str, &str, &str)> {
         let quote = raw_val.as_bytes()[0] as char;
         let close = raw_val[1..].find(quote)? + 1;
         let after = raw_val[close + 1..].trim_start();
-        if after.is_empty() { return None; }
+        if after.is_empty() {
+            return None;
+        }
         return Some((key, &raw_val[..=close], after));
     }
     let space = raw_val.find(' ')?;
     let value = &raw_val[..space];
     let command = raw_val[space + 1..].trim_start();
-    if command.is_empty() { None } else { Some((key, value, command)) }
+    if command.is_empty() {
+        None
+    } else {
+        Some((key, value, command))
+    }
 }
 
 /// Strip surrounding quotes from an already-expanded value string.
@@ -328,7 +334,7 @@ pub struct IfBlock {
     pub else_body: Option<String>,
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 mod tests {
     use super::*;
     use rstest::rstest;

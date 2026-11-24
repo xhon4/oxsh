@@ -19,7 +19,10 @@ fn issue_10_preserves_quoted_and_escaped_variables() {
         .stdout(predicate::str::contains("$OXSH_ISSUE10_VALUE secret"));
 
     oxsh()
-        .args(["-c", "echo pre'$OXSH_ISSUE10_VALUE'-\"$OXSH_ISSUE10_VALUE\""])
+        .args([
+            "-c",
+            "echo pre'$OXSH_ISSUE10_VALUE'-\"$OXSH_ISSUE10_VALUE\"",
+        ])
         .env("OXSH_ISSUE10_VALUE", "secret")
         .assert()
         .success()
@@ -66,7 +69,10 @@ fn issue_10_redirects_only_on_genuine_lexical_operator() {
 
     oxsh()
         .current_dir(dir.path())
-        .args(["-c", &format!("printf \"%s\" $OXSH_ISSUE10_OPERATOR {victim_arg}")])
+        .args([
+            "-c",
+            &format!("printf \"%s\" $OXSH_ISSUE10_OPERATOR {victim_arg}"),
+        ])
         .env("OXSH_ISSUE10_OPERATOR", ">")
         .assert()
         .success();
@@ -77,7 +83,10 @@ fn issue_10_redirects_only_on_genuine_lexical_operator() {
         .args(["-c", "printf '%s' redirected > actual"])
         .assert()
         .success();
-    assert_eq!(std::fs::read_to_string(dir.path().join("actual")).unwrap(), "redirected");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("actual")).unwrap(),
+        "redirected"
+    );
 }
 
 #[test]
@@ -141,7 +150,10 @@ fn issue_10_substitution_operators_do_not_redirect() {
 
     oxsh()
         .current_dir(dir.path())
-        .args(["-c", &format!("/usr/bin/printf '%s' $(/usr/bin/printf '>') {victim_arg}")])
+        .args([
+            "-c",
+            &format!("/usr/bin/printf '%s' $(/usr/bin/printf '>') {victim_arg}"),
+        ])
         .assert()
         .success();
     assert_eq!(std::fs::read_to_string(&victim).unwrap(), "preserved");
@@ -150,7 +162,10 @@ fn issue_10_substitution_operators_do_not_redirect() {
 #[test]
 fn issue_10_substitution_output_is_not_variable_expanded_again() {
     oxsh()
-        .args(["-c", "/usr/bin/printf '%s' \"$(/usr/bin/printf '$OXSH_ISSUE10_VALUE')\""])
+        .args([
+            "-c",
+            "/usr/bin/printf '%s' \"$(/usr/bin/printf '$OXSH_ISSUE10_VALUE')\"",
+        ])
         .env("OXSH_ISSUE10_VALUE", "secret")
         .assert()
         .success()
@@ -165,7 +180,10 @@ fn issue_10_quoted_command_substitution_does_not_glob() {
 
     oxsh()
         .current_dir(dir.path())
-        .args(["-c", "/usr/bin/printf '<%s>' \"$(/usr/bin/printf '*.txt')\""])
+        .args([
+            "-c",
+            "/usr/bin/printf '<%s>' \"$(/usr/bin/printf '*.txt')\"",
+        ])
         .assert()
         .success()
         .stdout(predicate::eq("<*.txt>"));
@@ -179,7 +197,10 @@ fn issue_10_quoted_backtick_substitution_does_not_glob() {
 
     oxsh()
         .current_dir(dir.path())
-        .args(["-c", r#"/usr/bin/printf '<%s>' "`/usr/bin/printf '*.txt'`""#])
+        .args([
+            "-c",
+            r#"/usr/bin/printf '<%s>' "`/usr/bin/printf '*.txt'`""#,
+        ])
         .assert()
         .success()
         .stdout(predicate::eq("<*.txt>"));
@@ -192,7 +213,10 @@ fn issue_10_mixed_fully_quoted_substitution_fragment_does_not_glob() {
 
     oxsh()
         .current_dir(dir.path())
-        .args(["-c", "/usr/bin/printf '<%s>' \"$(/usr/bin/printf x)\"'*.txt'"])
+        .args([
+            "-c",
+            "/usr/bin/printf '<%s>' \"$(/usr/bin/printf x)\"'*.txt'",
+        ])
         .assert()
         .success()
         .stdout(predicate::eq("<x*.txt>"));
@@ -426,7 +450,10 @@ fn partial_pipeline_consumer_does_not_hang() {
 #[test]
 fn issue_10_unquoted_command_substitution_is_field_split() {
     oxsh()
-        .args(["-c", "/usr/bin/printf '[%s]' $(/usr/bin/printf 'a b\\tc\\nd')"])
+        .args([
+            "-c",
+            "/usr/bin/printf '[%s]' $(/usr/bin/printf 'a b\\tc\\nd')",
+        ])
         .assert()
         .success()
         .stdout(predicate::eq("[a][b][c][d]"));
@@ -460,9 +487,123 @@ fn issue_10_split_substitution_fields_are_not_operators() {
     let dir = tempfile::tempdir().expect("temporary directory");
     oxsh()
         .current_dir(dir.path())
-        .args(["-c", "/usr/bin/printf '[%s]' $(/usr/bin/printf '> victim | cat')"])
+        .args([
+            "-c",
+            "/usr/bin/printf '[%s]' $(/usr/bin/printf '> victim | cat')",
+        ])
         .assert()
         .success()
         .stdout(predicate::eq("[>][victim][|][cat]"));
     assert!(!dir.path().join("victim").exists());
+}
+
+// ── Review follow-ups (PR #28) ──
+
+/// An empty (or whitespace-terminated) unquoted substitution must not turn the
+/// next operator into a plain argument. Data-loss reproducer from review:
+/// `rm -v $(find . -name '*.bak') > log.txt` used to delete `log.txt`.
+#[test]
+fn operators_after_empty_substitution_stay_operators() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let run = |script: &str| {
+        oxsh()
+            .current_dir(dir.path())
+            .args(["-c", script])
+            .timeout(std::time::Duration::from_secs(10))
+            .assert()
+    };
+    let read = |name: &str| std::fs::read_to_string(dir.path().join(name)).unwrap_or_default();
+
+    std::fs::write(dir.path().join("log.txt"), "important").unwrap();
+    run("rm -f $(/usr/bin/printf '') > log.txt");
+    assert!(
+        dir.path().join("log.txt").exists(),
+        "`>` after empty $(...) was passed to rm"
+    );
+
+    run("/usr/bin/printf hi $(true) > out1");
+    assert_eq!(read("out1"), "hi");
+    run("/usr/bin/printf hi `true` > out2");
+    assert_eq!(read("out2"), "hi");
+    run("/usr/bin/printf hi $(/usr/bin/printf 'x ') > out3");
+    assert_eq!(read("out3"), "hi");
+    run("/usr/bin/printf a > out4; /usr/bin/printf b $(true) >> out4");
+    assert_eq!(read("out4"), "ab");
+    run("/usr/bin/cat $(true) < out4 > out5");
+    assert_eq!(read("out5"), "ab");
+    run("ls /nonexistent-oxsh $(true) 2> err1");
+    assert!(read("err1").contains("nonexistent-oxsh"));
+    run("ls /nonexistent-oxsh $(true) 2>&1 | /usr/bin/wc -l > out6");
+    assert_eq!(read("out6").trim(), "1");
+    run("/usr/bin/printf hi $(true) | /usr/bin/tr h j > out7");
+    assert_eq!(read("out7"), "ji");
+    run("/usr/bin/printf bg $(true) &")
+        .success()
+        .stdout(predicate::str::contains("[bg] pid="));
+}
+
+/// `${VAR:-word}` is one parameter expansion even when `word` is quoted or
+/// escaped, as on main (review: `${UNSET:-'lit'}` printed `lit}`).
+#[test]
+fn braced_parameter_with_quoted_default_is_one_expansion() {
+    let cases = [
+        ("/usr/bin/printf '[%s]' ${OXSH_UNSET_X:-'lit'}", "[lit]"),
+        ("/usr/bin/printf '[%s]' ${OXSH_UNSET_X:-\\$x}", "[$x]"),
+        (
+            "/usr/bin/printf '[%s]' pre${OXSH_UNSET_X:-'x'}post",
+            "[prexpost]",
+        ),
+        ("/usr/bin/printf '[%s]' ${OXSH_UNSET_X:-\"a b\"}", "[a b]"),
+        ("/usr/bin/printf '[%s]' \"${OXSH_UNSET_X:-q}\"", "[q]"),
+        (
+            "/usr/bin/printf '[%s]' ${OXSH_UNSET_X:-$(/usr/bin/printf sub)}",
+            "[sub]",
+        ),
+        ("/usr/bin/printf '[%s]' ${OXSH_SET_X:-'no'}", "[yes]"),
+    ];
+    for (script, expected) in cases {
+        oxsh()
+            .args(["-c", script])
+            .env_remove("OXSH_UNSET_X")
+            .env("OXSH_SET_X", "yes")
+            .assert()
+            .success()
+            .stdout(predicate::eq(expected));
+    }
+}
+
+/// Alias bodies are expanded after alias substitution (POSIX order), so
+/// variables, `~` and positional parameters inside them work again.
+#[test]
+fn alias_bodies_are_expanded_after_substitution() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let home = dir.path().to_str().unwrap();
+    let cases = [
+        (
+            "alias g='/usr/bin/printf [%s] $HOME/x'; g",
+            format!("[{home}/x]"),
+        ),
+        (
+            "alias g='/usr/bin/printf [%s] ${HOME}'; g",
+            format!("[{home}]"),
+        ),
+        (
+            "X=hi; alias g='/usr/bin/printf [%s] $X'; g",
+            "[hi]".to_string(),
+        ),
+        (
+            "alias g='/usr/bin/printf [%s] ~/y'; g",
+            format!("[{home}/y]"),
+        ),
+        ("alias q='cd $HOME'; q; pwd", format!("{home}\n")),
+    ];
+    for (script, expected) in cases {
+        oxsh()
+            .current_dir("/")
+            .env("HOME", home)
+            .args(["-c", script])
+            .assert()
+            .success()
+            .stdout(predicate::eq(expected.as_str()));
+    }
 }

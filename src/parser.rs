@@ -17,7 +17,10 @@ pub struct Fragment {
 
 impl Word {
     pub fn text(&self) -> String {
-        self.fragments.iter().map(|part| part.text.as_str()).collect()
+        self.fragments
+            .iter()
+            .map(|part| part.text.as_str())
+            .collect()
     }
 
     pub fn literal(text: String) -> Self {
@@ -35,7 +38,10 @@ impl Word {
 /// Tokenize raw input into arguments, handling quotes, escapes and substitutions.
 #[allow(dead_code)]
 pub fn tokenize(input: &str) -> Vec<String> {
-    tokenize_words(input).into_iter().map(|word| word.text()).collect()
+    tokenize_words(input)
+        .into_iter()
+        .map(|word| word.text())
+        .collect()
 }
 
 /// Tokenize input and also return a parallel bool vector indicating which
@@ -76,6 +82,17 @@ pub fn tokenize_words(input: &str) -> Vec<Word> {
             has_unquoted_char = true;
             i += 1;
             continue;
+        }
+        if !in_single && ch == '$' && chars.get(i + 1) == Some(&'{') {
+            if let Some((text, end)) = lex_braced_parameter(&chars, i) {
+                push_text_fragment(&mut current, &text, true);
+                operator_eligible = false;
+                if !in_double {
+                    has_unquoted_char = true;
+                }
+                i = end + 1;
+                continue;
+            }
         }
         if !in_single && ch == '$' && chars.get(i + 1) == Some(&'(') {
             if let Some(end) = find_subshell_end(&chars, i + 2) {
@@ -152,8 +169,10 @@ pub fn tokenize_words(input: &str) -> Vec<Word> {
                     );
                     was_quoted = false;
                     has_unquoted_char = false;
-                    operator_eligible = true;
                 }
+                // Every unquoted blank starts a new word that may be an operator,
+                // even when no word was pending (e.g. after an empty `$(...)`).
+                operator_eligible = true;
             }
             _ => {
                 if !in_single && !in_double {
@@ -247,6 +266,49 @@ fn finish_word(
     });
     word.operator = false;
     word.fully_quoted = false;
+}
+
+/// Lex `${...}` starting at `chars[start]` (the `$`) into a single piece of
+/// text for parameter expansion. Inside the braces, quotes are removed,
+/// backslash escapes keep the escaped character, and `$(...)`/backticks are
+/// substituted, matching how main treated the whole word before expansion
+/// (e.g. `${UNSET:-'lit'}` -> `lit`). Returns the text and the index of the
+/// closing `}`, or `None` if there is no closing brace.
+fn lex_braced_parameter(chars: &[char], start: usize) -> Option<(String, usize)> {
+    let mut text = String::from("${");
+    let mut single = false;
+    let mut double = false;
+    let mut i = start + 2;
+    while i < chars.len() {
+        let ch = chars[i];
+        match ch {
+            '}' if !single && !double => {
+                text.push('}');
+                return Some((text, i));
+            }
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '\\' if !single => {
+                i += 1;
+                text.push(*chars.get(i)?);
+            }
+            '$' if !single && chars.get(i + 1) == Some(&'(') => {
+                let end = find_subshell_end(chars, i + 2)?;
+                let command: String = chars[i + 2..end].iter().collect();
+                text.push_str(&run_subshell(&command));
+                i = end;
+            }
+            '`' if !single => {
+                let end = (i + 1..chars.len()).find(|&j| chars[j] == '`')?;
+                let command: String = chars[i + 1..end].iter().collect();
+                text.push_str(&run_subshell(&command));
+                i = end;
+            }
+            _ => text.push(ch),
+        }
+        i += 1;
+    }
+    None
 }
 
 fn find_subshell_end(chars: &[char], start: usize) -> Option<usize> {
@@ -366,7 +428,9 @@ pub fn parse_pipeline_from_words(token_groups: Vec<Vec<Word>>) -> Vec<Command> {
     token_groups
         .into_iter()
         .map(|mut words| {
-            let background = words.last().is_some_and(|word| word.operator && word.text() == "&");
+            let background = words
+                .last()
+                .is_some_and(|word| word.operator && word.text() == "&");
             if background {
                 words.pop();
             }
@@ -450,7 +514,7 @@ fn split_on_pipes(input: &str) -> Vec<&str> {
 }
 
 /// Extract redirect operators from tokens: <, >, >>, 2>, 2>>, 2>&1
-#[cfg(test)]
+#[allow(dead_code)]
 fn extract_redirects(
     tokens: &mut Vec<String>,
 ) -> (Option<String>, Option<Redirect>, Option<Redirect>, bool) {
@@ -585,7 +649,10 @@ pub fn expand_brace_words(words: &mut Vec<Word>) {
 pub fn expand_glob_words(words: &mut Vec<Word>) {
     let mut result = Vec::with_capacity(words.len());
     for word in words.drain(..) {
-        if word.fully_quoted { result.push(word); continue; }
+        if word.fully_quoted {
+            result.push(word);
+            continue;
+        }
         let text = word.text();
         let mut expanded = vec![text.clone()];
         expand_globs_respecting_quotes(&mut expanded, &[false]);
@@ -828,7 +895,7 @@ fn run_subshell(cmd: &str) -> String {
     }
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 mod tests {
     use super::*;
 
