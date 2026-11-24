@@ -1,6 +1,6 @@
 # 🔮 oxsh
 
-Hybrid shell built in Rust. oxsh blends POSIX compatibility with structured data pipelines, real-time editing feedback, and environment-aware intelligence.
+Hybrid shell built in Rust. oxsh blends POSIX-style shell syntax with structured data pipelines, real-time editing feedback, and environment-aware intelligence.
 
 ## ✨ Features
 
@@ -28,8 +28,8 @@ kubectl get pods -o json | from-json | get items \
 
 ### 🧭 Environment-Aware Intelligence
 - **Automatic Project Detection**: Recognizes Rust, Node.js, Python, Go, Kubernetes, and Docker projects and surfaces relevant context in your prompt.
-- **Adaptive Powerline Prompt**: Modular segments for CWD, git branch, project type, command duration, virtualenv, K8s namespace, SSH host, and more — all configurable via TOML.
-- **Git Integration**: Branch name and status reflected directly in the prompt without external scripts.
+- **Adaptive Powerline Prompt**: Modular segments for CWD, git branch, project type, command duration, virtualenv, Kubernetes context, SSH session indicator, and more — all configurable via TOML.
+- **Git Integration**: The current branch is shown directly in the prompt, without external scripts.
 
 ```
  ~/project  main  rust 🦀 ❯
@@ -38,23 +38,37 @@ kubectl get pods -o json | from-json | get items \
 ### 📂 Navigation & Productivity
 - **Browser-Style Directory History**: `back` and `next` commands to traverse your directory history like a browser.
 - **Auto-cd**: Type a directory name and you're there — no `cd` required.
-- **Last Command Recall**: `!!` expands to your previous command anywhere in the line (e.g., `sudo !!`).
-- **Inline Help**: `?? command` fetches a quick explanation without leaving the shell.
-- **Universal Glob Expansion**: Native support for `*`, `?`, and `[]` patterns across all commands.
+- **History Expansion**: `!!` expands to your previous command and `!$` to its last argument, anywhere in the line (e.g., `sudo !!`).
+- **Inline Help**: `?? command` tells you whether a command is a builtin, a structured pipeline command (with its usage), or an executable on your `PATH` — without running it.
+- **Glob Expansion**: Native support for `*`, `?`, and `[]` patterns in command arguments.
 
-### 🔧 POSIX Compatibility & Scripting
-oxsh doesn't force you into a new paradigm. Standard shell constructs work as expected:
+### 🔧 Shell Scripting
+oxsh supports the everyday shell constructs:
 
 ```bash
-# Loops, conditionals, chains
-for f in *.log; do grep -c ERROR "$f"; done
+# Loops, conditionals, variables
+for f in app.log db.log; do grep -c ERROR "$f"; done
 if cargo build; then cargo test; else echo "build failed"; fi
 NAME="world"; echo "hello $NAME"
+echo "editor: ${EDITOR:-vi}"
 ```
 
-Pipes, redirects (`>`, `>>`, `2>`), environment variables, background jobs (`&`), and brace expansion all work out of the box.
+Also supported: `for`/`while`/`if` blocks, `&&`/`||` chains, pipes, redirects for external commands (`<`, `>`, `>>`, `2>`, `2>>`, `2>&1`), `VAR=val cmd` prefixes, `${VAR:-default}`, command substitution (`$(...)` and backticks), trailing background jobs (`cmd &`, with `$!`), and brace expansion (`{a,b}`, `{1..5}`).
 
-**Cross-platform**: Linux, macOS, and Windows.
+### ⚠️ Known Limitations
+oxsh is not a full POSIX shell yet. Notable gaps, most of them tracked in the [issue tracker](https://github.com/xhon4/oxsh/issues):
+
+- `case`, shell functions, and heredocs are not supported yet.
+- A `for`/`while`/`if` block must be the whole command line: it can't be combined with other commands through `;`, `&&` or `||` yet.
+- Builtins and control-flow blocks don't take part in pipes and redirections yet ([#11](https://github.com/xhon4/oxsh/issues/11)).
+- A failed `&&`/`||` chain also skips independent commands after `;` ([#12](https://github.com/xhon4/oxsh/issues/12)).
+- Quotes are not fully preserved before expansion: a quoted `>` can still act as a redirection ([#10](https://github.com/xhon4/oxsh/issues/10), fix pending merge), and brace expansion also applies inside quotes.
+- Redirect order is not fully honored, e.g. `cmd > file 2>&1` ([#16](https://github.com/xhon4/oxsh/issues/16)).
+- Very large brace ranges are not bounded ([#25](https://github.com/xhon4/oxsh/issues/25)).
+- A glob in a `for` list (`for f in *.log`) is passed as a single item.
+- Only a trailing `&` starts a background job, and there is no job control yet.
+
+**Platforms**: developed and tested on Linux. The code includes macOS and Windows support, but those platforms are not yet verified in CI ([#27](https://github.com/xhon4/oxsh/issues/27)).
 
 ### 🛠️ Built-in Commands
 
@@ -63,11 +77,14 @@ Pipes, redirects (`>`, `>>`, `2>`), environment variables, background jobs (`&`)
 | `cd [dir]` | Change directory (`cd -` for previous) |
 | `back` / `next` | Browser-style directory history |
 | `alias` / `unalias` | Manage shell aliases |
-| `export VAR=val` | Set environment variables |
+| `export VAR=val` / `unset VAR` | Set or remove environment variables |
+| `read [-p prompt] VAR` | Read a line from stdin into a variable |
 | `source [file]` | Reload configuration (`reload` alias) |
 | `history` | Browse command history |
 | `which` / `type` | Locate and identify commands |
 | `context` | Show detected project environment |
+| `?? command` | Explain what a command is, without running it |
+| `help` / `exit` | Show built-in help / exit the shell |
 | `echo`, `pwd`, `true`, `false` | Standard POSIX builtins |
 
 ### 🔀 Pipeline Commands Reference
@@ -83,13 +100,15 @@ Pipes, redirects (`>`, `>>`, `2>`), environment variables, background jobs (`&`)
 | `get FIELD` | Extract nested field values | `... \| get name` |
 | `first [N]` / `last [N]` | Take the first or last N items | `... \| first 5` |
 | `count` | Count items in a collection | `... \| count` |
-| `uniq` | Remove consecutive duplicates | `... \| uniq` |
+| `uniq` | Remove duplicate items (keeps the first occurrence) | `... \| uniq` |
 | `reverse` | Reverse item order | `... \| reverse` |
 | `flatten` | Flatten nested arrays | `... \| flatten` |
 
-Comparison operators for `where`: `==`, `!=`, `>`, `<`, `>=`, `<=`, `=~` (contains), `^=` (starts-with).
+Comparison operators for `where`: `eq`/`==`, `ne`/`!=`, `gt`, `lt`, `ge`, `le`, `=~` (contains), `^=` (starts-with). Use the word forms for ordering comparisons: an unquoted `>` or `<` is parsed as a redirection.
 
 ## 🚀 Quick Start
+
+**Requirements**: a stable Rust toolchain with edition 2024 support (install via [rustup](https://rustup.rs)).
 
 ### Linux / macOS
 
@@ -117,6 +136,12 @@ sudo cp target/release/oxsh /usr/local/bin/
 oxsh --init   # generate default config
 ```
 
+### Running a single command
+
+```bash
+oxsh -c 'ls | wc -l'
+```
+
 ## ⚙️ Configuration
 
 All settings live in a single TOML file at `~/.oxshrc` (Linux/macOS) or `%APPDATA%\oxsh\config.toml` (Windows).
@@ -136,6 +161,7 @@ glob = true
 [prompt]
 left = "{status}{cwd}{git}{context}"
 right = "{duration}"
+vi_mode = false
 
 [history]
 max_size = 50000
@@ -154,7 +180,7 @@ EDITOR = "nvim"
 prepend = ["~/.local/bin", "~/.cargo/bin"]
 ```
 
-Available prompt tokens: `{cwd}`, `{git}`, `{project}`, `{context}`, `{status}`, `{duration}`, `{venv}`, `{k8s}`, `{ssh}`, `{user}`, `{host}`
+Available prompt tokens: `{cwd}`, `{cwd:short}`, `{cwd:full}`, `{git}` (alias `{git:branch}`), `{project}`, `{context}`, `{status}`, `{duration}`, `{venv}`, `{k8s}`, `{ssh}`, `{user}`, `{host}`
 
 ## 🗺️ Roadmap
 
@@ -162,9 +188,10 @@ Available prompt tokens: `{cwd}`, `{git}`, `{project}`, `{context}`, `{status}`,
 - SQLite-backed queryable history
 - Async prompt rendering (git status in background)
 - Job control (`fg`, `bg`, `jobs`)
-- Subshell support `$()`
 - Heredocs
 - Session recording & replay
+
+Planned fixes and smaller improvements are tracked in the [open issues](https://github.com/xhon4/oxsh/issues).
 
 ## 🤝 Contributing
 
