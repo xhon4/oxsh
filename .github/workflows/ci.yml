@@ -1,21 +1,27 @@
 # CI baseline for https://github.com/xhon4/oxsh/issues/27
 #
 # What this workflow claims, and what it does not:
-# - Linux (ubuntu-latest): build, test, and Clippy are required. This is the
-#   only platform on which the test suite has been run locally.
-# - rustfmt is non-blocking: main has 67 preexisting rustfmt hunks in 14
-#   files. A dedicated formatting PR should make this required later. This
-#   PR does not reformat the tree (it would collide with other open work).
-# - macOS: compile-only (`cargo check`). Functional tests are not run, and
-#   compile success is not claimed until this job has actually passed in
-#   GitHub Actions.
-# - Windows: compile-only, allowed to fail. `main` does not compile for
-#   Windows (#30: `unix_setup` is referenced under `cfg!(windows)` in
-#   src/setup.rs). Do not treat a red Windows job as a regression until #30
-#   is fixed and `continue-on-error` is removed.
+# - Linux (ubuntu-latest): build, test, and Clippy are required. The test
+#   suite has also been run locally in bubblewrap, and on GitHub Actions
+#   (run 45323378507, rustc 1.100.0 / 1.88.0).
+# - macOS: compile-only (`cargo check`). Verified on GitHub Actions
+#   (run 45323378507, macos-26-arm64, rustc 1.100.0). Functional tests
+#   are not run and are not claimed.
+# - rustfmt is omitted from this workflow. main has 67 preexisting hunks
+#   in 14 files; a non-blocking or "always green" rustfmt job would not
+#   distinguish that drift from new drift. A dedicated formatting PR will
+#   format the tree and add rustfmt --check as a required job. That PR
+#   should land after the #10 parser redesign (PR-A) so it does not
+#   collide with open parser work. See the #31 PR body.
+# - Windows is omitted from this workflow. main does not compile (#30:
+#   `unix_setup` is still type-checked under `cfg!(windows)` in
+#   src/setup.rs). A job allowed to fail on any error would hide new
+#   compile breaks. The Windows compile job will be added, required, in
+#   the PR that fixes #30.
 # - PTY tests (tests/interactive_signals.rs) are `cfg(target_os = "linux")`.
 #   They open their own PTY via posix_openpt; they do not need the runner's
-#   stdin to be a TTY. They passed locally inside bubblewrap with /dev/ptmx.
+#   stdin to be a TTY. They passed locally inside bubblewrap with /dev/ptmx,
+#   and in the Linux test jobs of run 45323378507.
 #
 # Actions are official: actions/checkout@v7, dtolnay/rust-toolchain@stable
 # and @1.88.0 (the @rev selects the toolchain; see the action README).
@@ -77,39 +83,10 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
-  rustfmt:
-    name: rustfmt (non-blocking baseline)
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    # Preexisting drift on main: 67 hunks across 14 src/*.rs files
-    # (`cargo fmt --all -- --check` on 50b0428). Keep this job visible but
-    # non-blocking until a dedicated formatting PR lands.
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - name: rustfmt --check (expected to fail until a formatting PR)
-        run: cargo fmt --all -- --check
-
   compile-macos:
     name: macOS compile only (not functionally tested)
     runs-on: macos-latest
     timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Check
-        run: cargo check --locked --all-targets
-
-  compile-windows:
-    name: Windows compile only (allowed to fail; see #30)
-    runs-on: windows-latest
-    timeout-minutes: 20
-    # Preexisting compile error on main: #30 (src/setup.rs, unix_setup).
-    # Remove continue-on-error when #30 is fixed.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
