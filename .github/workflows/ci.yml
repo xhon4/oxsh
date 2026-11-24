@@ -149,40 +149,37 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - name: "Check and report known Windows failure (issue 30)"
+      - name: Check and report #30 without a red X
         shell: bash
         run: |
-          # GHA bash is invoked with -e -o pipefail. Stay with +e after cargo
-          # returns, and do not grep ANSI-colored phrases (run 45323738915
-          # exited 1 inside the summary pipeline before it could warn).
           set +e
-          set +o pipefail
-          CARGO_TERM_COLOR=never cargo check --locked --all-targets > check-win.log 2>&1
+          cargo check --locked --all-targets > check-win.log 2>&1
           status=$?
+          set -e
           cat check-win.log
           if [ "$status" -eq 0 ]; then
             {
               echo "## Windows compile succeeded"
               echo
-              echo "cargo check --locked --all-targets passed on windows-latest. Remove this soft-success path and treat the job as required; update or close issue 30."
+              echo "\`cargo check --locked --all-targets\` passed on windows-latest. Remove this soft-success path and treat the job as required; update or close #30."
             } >> "$GITHUB_STEP_SUMMARY"
             echo "::notice title=Windows compile succeeded::cargo check passed on windows-latest. The soft-success path can be removed; see https://github.com/xhon4/oxsh/issues/30"
             exit 0
           fi
-          if grep -F -q unix_setup check-win.log && grep -F -q E0425 check-win.log; then
+          if grep -q 'cannot find function `unix_setup`' check-win.log && grep -q 'setup.rs' check-win.log; then
             {
               echo "## Windows compile failed (expected; see #30)"
               echo
-              echo "cargo check --locked --all-targets failed on windows-latest with the preexisting bug in [#30](https://github.com/xhon4/oxsh/issues/30): unix_setup is still type-checked under cfg!(windows) (src/setup.rs:14, error[E0425])."
+              echo "\`cargo check --locked --all-targets\` failed on windows-latest with the preexisting bug in [#30](https://github.com/xhon4/oxsh/issues/30): \`unix_setup\` is still type-checked under \`cfg!(windows)\` (\`src/setup.rs:14\`, \`error[E0425]\`)."
               echo
               echo "This job concludes success so the known failure does not show as a red X. Remove the soft-success path when #30 is fixed."
               echo
               echo '```'
-              grep -E 'error|setup.rs|CloseHandle|unused import' check-win.log | head -40 || true
+              grep -E 'error(\[E[0-9]+\])?:|--> src|warning: unused' check-win.log | head -40
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
-            echo "::warning file=src/setup.rs,line=14,title=Windows does not compile (see issue 30)::error[E0425]: cannot find function unix_setup in this scope. Preexisting; https://github.com/xhon4/oxsh/issues/30"
+            echo "::warning file=src/setup.rs,line=14,title=Windows does not compile (see #30)::error[E0425]: cannot find function unix_setup in this scope. Preexisting; https://github.com/xhon4/oxsh/issues/30"
             exit 0
           fi
-          echo "::error title=Unexpected Windows compile failure::cargo check failed with an error that is not the known issue 30 unix_setup failure. See the log."
+          echo "::error title=Unexpected Windows compile failure::cargo check failed with an error that is not the known #30 unix_setup issue. See the log."
           exit "$status"
