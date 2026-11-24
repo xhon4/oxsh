@@ -36,7 +36,7 @@ impl Word {
 }
 
 /// Tokenize raw input into arguments, handling quotes, escapes and substitutions.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn tokenize(input: &str) -> Vec<String> {
     tokenize_words(input)
         .into_iter()
@@ -47,7 +47,7 @@ pub fn tokenize(input: &str) -> Vec<String> {
 /// Tokenize input and also return a parallel bool vector indicating which
 /// tokens were entirely enclosed in quotes. Used to suppress glob expansion
 /// on tokens like `"*.txt"` where the user intended a literal string.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn tokenize_with_quote_flags(input: &str) -> (Vec<String>, Vec<bool>) {
     let words = tokenize_words(input);
     (
@@ -354,7 +354,7 @@ pub fn expand_vars(tokens: &mut [String]) {
 
 /// Resolve aliases with recursion support and a depth limit to prevent hangs
 /// from self-referencing aliases like `alias ls='ls --color'`.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn resolve_alias(tokens: &mut Vec<String>, aliases: &HashMap<String, String>) {
     resolve_alias_depth(tokens, aliases, 0);
 }
@@ -384,7 +384,7 @@ fn resolve_word_aliases_depth(
     }
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn resolve_alias_depth(
     tokens: &mut Vec<String>,
     aliases: &HashMap<String, String>,
@@ -514,7 +514,7 @@ fn split_on_pipes(input: &str) -> Vec<&str> {
 }
 
 /// Extract redirect operators from tokens: <, >, >>, 2>, 2>>, 2>&1
-#[allow(dead_code)]
+#[cfg(test)]
 fn extract_redirects(
     tokens: &mut Vec<String>,
 ) -> (Option<String>, Option<Redirect>, Option<Redirect>, bool) {
@@ -621,7 +621,7 @@ fn contains_glob_chars(s: &str) -> bool {
 /// Expand brace expressions in tokens: `{a,b,c}` → three tokens,
 /// `{1..5}` → five tokens, `{a..e}` → five tokens.
 /// Braces inside single-quoted strings are not expanded.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn expand_braces(tokens: &mut Vec<String>) {
     let mut result = Vec::with_capacity(tokens.len());
     for token in tokens.drain(..) {
@@ -780,7 +780,7 @@ fn try_range_expand(inner: &str) -> Option<Vec<String>> {
 /// context so that an apostrophe inside double quotes does not wrongly disable
 /// expansion. Escaped characters inside `$(...)` are skipped, not counted toward
 /// the parenthesis depth.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn expand_subshells(input: &str) -> String {
     // Fast-path: avoid Vec<char> allocation when no expansion markers exist (P4).
     if !input.contains('$') && !input.contains('`') {
@@ -895,7 +895,7 @@ fn run_subshell(cmd: &str) -> String {
     }
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 mod tests {
     use super::*;
 

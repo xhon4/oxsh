@@ -65,7 +65,7 @@ pub fn is_var_assignment(input: &str) -> Option<(&str, &str)> {
 ///
 /// Returns `Some((key, value, command))` when a command follows the assignment.
 /// Returns `None` for pure assignments (`FOO=bar`) so the caller handles those.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn parse_env_prefix(input: &str) -> Option<(&str, &str, &str)> {
     let (key, raw_val) = is_var_assignment(input)?;
 
@@ -113,7 +113,7 @@ pub fn parse_env_prefix_raw(input: &str) -> Option<(&str, &str, &str)> {
 
 /// Strip surrounding quotes from an already-expanded value string.
 /// Call this after subshell/variable expansion if the value came from a literal.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn strip_quotes(val: &str) -> &str {
     val.strip_prefix('"')
         .and_then(|v| v.strip_suffix('"'))
@@ -334,7 +334,7 @@ pub struct IfBlock {
     pub else_body: Option<String>,
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 mod tests {
     use super::*;
     use rstest::rstest;
