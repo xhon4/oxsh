@@ -269,6 +269,11 @@ impl Shell {
                     if self.handle_input(&input) {
                         break 'mainloop;
                     }
+                    // A Ctrl-C anywhere on the line (even one whose only effect was
+                    // killing a `$(...)`) leaves `$?` = 130.
+                    if executor::was_interrupted() {
+                        self.last_exit_code = 130;
+                    }
 
                     if let Err(e) = self.line_editor.sync_history() {
                         eprintln!("oxsh: history sync error: {e}");
@@ -472,6 +477,11 @@ impl Shell {
                 let final_val = scripting::strip_quotes(&final_val).to_string();
                 self.shell_vars.set(key, &final_val);
                 self.last_exit_code = 0;
+                // ^C during `$(...)` in the value abandons the rest of the line.
+                if executor::was_interrupted() {
+                    self.last_exit_code = 130;
+                    break;
+                }
                 if should_skip(op, self.last_exit_code) {
                     break;
                 }
@@ -486,6 +496,12 @@ impl Shell {
             );
             if tokens.is_empty() {
                 continue;
+            }
+            // ^C while a `$(...)` was being expanded: never run the command with
+            // a truncated expansion (e.g. `rm -rf "$(slow)"/build`).
+            if executor::was_interrupted() {
+                self.last_exit_code = 130;
+                break;
             }
 
             // Auto-cd
@@ -749,7 +765,7 @@ impl Shell {
             let final_val = val_tokens.join(" ");
             let final_val = scripting::strip_quotes(&final_val).to_string();
             self.shell_vars.set(key, &final_val);
-            return 0;
+            return if executor::was_interrupted() { 130 } else { 0 };
         }
 
         let (tokens, quoted_flags) = expand_and_resolve(
@@ -760,6 +776,9 @@ impl Shell {
         );
         if tokens.is_empty() {
             return 0;
+        }
+        if executor::was_interrupted() {
+            return 130;
         }
 
         if let Some(code) = builtins::try_builtin(&tokens, &self.shell_vars) {

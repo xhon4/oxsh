@@ -211,3 +211,37 @@ fn ctrl_c_abandons_loops_and_the_rest_of_the_line() {
         "commands after ^C on the same line still ran"
     );
 }
+
+/// Ctrl-C while a command substitution runs must abort the whole command:
+/// the outer command never runs with the truncated expansion, and `$?` is
+/// 130. Covers the main path, a pure assignment and a loop body.
+#[test]
+fn ctrl_c_during_command_substitution_aborts_the_command() {
+    let mut sh = Session::start();
+    sh.run_marked("echo READY\"_\"2", "READY_2");
+
+    sh.send(b"/bin/echo RAN\"_\"[$(sleep 3)]\r");
+    std::thread::sleep(Duration::from_millis(500));
+    sh.send(b"\x03");
+    sh.run_marked("echo SUBST\"_\"$?", "SUBST_130");
+
+    sh.send(b"X=\"$(sleep 3)\"\r");
+    std::thread::sleep(Duration::from_millis(500));
+    sh.send(b"\x03");
+    sh.run_marked("echo ASSIGN\"_\"$?", "ASSIGN_130");
+
+    sh.send(b"for i in 1 2; do /bin/echo BODY\"_\"RAN$(sleep 3); done\r");
+    std::thread::sleep(Duration::from_millis(500));
+    sh.send(b"\x03");
+    sh.run_marked("echo BODY\"_\"$?", "BODY_130");
+
+    let out = String::from_utf8_lossy(&sh.output.lock().unwrap()).to_string();
+    assert!(
+        !out.contains("RAN_["),
+        "outer command ran after ^C interrupted its $(...)"
+    );
+    assert!(
+        !out.contains("BODY_RAN"),
+        "loop body command ran after ^C interrupted its $(...)"
+    );
+}
