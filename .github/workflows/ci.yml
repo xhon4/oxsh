@@ -1,0 +1,119 @@
+# CI baseline for https://github.com/xhon4/oxsh/issues/27
+#
+# What this workflow claims, and what it does not:
+# - Linux (ubuntu-latest): build, test, and Clippy are intended to be
+#   required. They are not enforced by branch protection yet (that is an
+#   owner setting). The merge gate is: all four jobs green on the exact
+#   head commit, or on the merge commit of this PR into main.
+# - macOS: check-only (`cargo check` type-checks all targets; no codegen,
+#   linking, or tests). Verified on GitHub Actions (runs 45323378507 and
+#   45324753024, macos-latest, rustc 1.100.0). Functional tests are not
+#   run and are not claimed.
+# - rustfmt is omitted from this workflow. main has 67 preexisting hunks
+#   in 14 files; a non-blocking or "always green" rustfmt job would not
+#   distinguish that drift from new drift. Tracked in #32. A dedicated
+#   formatting PR after the #10 expansion redesign will format the tree
+#   and add rustfmt --check, intended to be required (same owner setting).
+# - Windows is omitted from this workflow. main does not compile (#30:
+#   `unix_setup` is still type-checked under `cfg!(windows)` in
+#   src/setup.rs). A job allowed to fail on any error would hide new
+#   compile breaks. The Windows job will be added in the PR that fixes
+#   #30, intended to be required, with no continue-on-error.
+# - PTY tests (tests/interactive_signals.rs) are `cfg(target_os = "linux")`.
+#   They open their own PTY via posix_openpt; they do not need the runner's
+#   stdin to be a TTY. They passed locally inside bubblewrap with /dev/ptmx,
+#   and in the Linux test jobs of runs 45323378507 and 45324753024.
+# - Clippy runs on floating stable with `-D warnings`. A new rustc/clippy
+#   release can turn this job red with no oxsh code change. That reflects
+#   real lint state; fix those failures in a dedicated PR.
+#
+# Actions: first-party actions/checkout, pinned to the v7.0.1 SHA, and the
+# widely used third-party dtolnay/rust-toolchain (not official GitHub or
+# Rust-project infrastructure), pinned to a master SHA with an explicit
+# `toolchain:` input (not the mutable @stable / @1.88.0 branches).
+# Permissions are contents: read only. No paid services; this repository
+# is public, so GitHub-hosted runners are free.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Cancel superseded PR runs only. A push to main keeps a completed result
+  # so main can be rechecked after each merge.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test-linux:
+    name: Linux tests (stable)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+      - name: Build
+        run: cargo build --locked --all-targets
+      - name: Test
+        run: cargo test --locked --no-fail-fast
+
+  msrv:
+    name: Linux MSRV 1.88.0
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: 1.88.0
+      - name: Test on the verified MSRV
+        run: cargo test --locked --no-fail-fast
+
+  clippy:
+    name: Linux Clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+          components: clippy
+      # -D warnings is used because `cargo clippy --locked --all-targets -- -D warnings`
+      # is clean on main (50b0428) with rustc 1.100.0, aside from the preexisting
+      # cargo manifest warning `package.homepage` (not a rustc/clippy lint).
+      # Floating stable can go red on a new lint with no oxsh change; fix that
+      # in a dedicated PR rather than weakening -D warnings.
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  check-macos:
+    name: macOS check-only (type-check, no tests)
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+      - name: Check
+        run: cargo check --locked --all-targets

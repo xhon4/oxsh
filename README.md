@@ -68,7 +68,7 @@ oxsh is not a full POSIX shell yet. Notable gaps, most of them tracked in the [i
 - A glob in a `for` list (`for f in *.log`) is passed as a single item.
 - Only a trailing `&` starts a background job, and there is no job control yet.
 
-**Platforms**: developed and tested on Linux. The code includes macOS and Windows support, but those platforms are not yet verified in CI ([#27](https://github.com/xhon4/oxsh/issues/27)).
+**Platforms**: developed and tested on Linux (CI builds and runs the test suite on Ubuntu). macOS has a check-only CI job (`cargo check`: type-checked, not built or tested; verified on GitHub Actions). Windows does not currently compile ([#30](https://github.com/xhon4/oxsh/issues/30)); there is no Windows CI job until that is fixed. Neither macOS nor Windows has been functionally verified.
 
 ### 🛠️ Built-in Commands
 
@@ -108,7 +108,7 @@ Comparison operators for `where`: `eq`/`==`, `ne`/`!=`, `gt`, `lt`, `ge`, `le`, 
 
 ## 🚀 Quick Start
 
-**Requirements**: a stable Rust toolchain with edition 2024 support (install via [rustup](https://rustup.rs)).
+**Requirements**: Rust 1.88 or later (install via [rustup](https://rustup.rs)). Edition 2024 is used; 1.88 is the verified minimum (`package.rust-version`).
 
 ### Linux / macOS
 
@@ -120,13 +120,11 @@ cd oxsh
 
 This builds the release binary, copies it to `/usr/local/bin`, generates `~/.oxshrc`, and registers oxsh in `/etc/shells`.
 
+On macOS, CI only type-checks the tree (`cargo check`); it does not build or run tests. `./install.sh` has not been functionally verified on macOS.
+
 ### Windows (PowerShell)
 
-```powershell
-git clone https://github.com/xhon4/oxsh.git
-cd oxsh
-.\install.ps1
-```
+Not working yet: Windows does not currently compile ([#30](https://github.com/xhon4/oxsh/issues/30)). There is no supported install path until that is fixed. `install.ps1` remains in the repository as the intended script once the tree builds on Windows; do not run it expecting a working shell today.
 
 ### Manual Build
 
