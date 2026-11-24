@@ -10,6 +10,236 @@ fn oxsh() -> Command {
 }
 
 #[test]
+fn issue_10_preserves_quoted_and_escaped_variables() {
+    oxsh()
+        .args(["-c", "echo '$OXSH_ISSUE10_VALUE' \"$OXSH_ISSUE10_VALUE\""])
+        .env("OXSH_ISSUE10_VALUE", "secret")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("$OXSH_ISSUE10_VALUE secret"));
+
+    oxsh()
+        .args([
+            "-c",
+            "echo pre'$OXSH_ISSUE10_VALUE'-\"$OXSH_ISSUE10_VALUE\"",
+        ])
+        .env("OXSH_ISSUE10_VALUE", "secret")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("pre$OXSH_ISSUE10_VALUE-secret"));
+
+    oxsh()
+        .args(["-c", "echo \\$OXSH_ISSUE10_VALUE"])
+        .env("OXSH_ISSUE10_VALUE", "secret")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("$OXSH_ISSUE10_VALUE"));
+}
+
+#[test]
+fn issue_10_preserves_quoted_and_expansion_produced_operators() {
+    oxsh()
+        .args(["-c", "echo '>' \\> $OXSH_ISSUE10_OPERATOR"])
+        .env("OXSH_ISSUE10_OPERATOR", ">")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("> > >"));
+}
+
+#[test]
+fn issue_10_redirects_only_on_genuine_lexical_operator() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let victim = dir.path().join("victim");
+    std::fs::write(&victim, "preserved").expect("seed victim file");
+    let victim_arg = victim.to_str().unwrap();
+
+    oxsh()
+        .current_dir(dir.path())
+        .args(["-c", &format!("printf \"%s\" '>' {victim_arg}")])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "preserved");
+
+    oxsh()
+        .current_dir(dir.path())
+        .args(["-c", &format!("printf '%s' \\> {victim_arg}")])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "preserved");
+
+    oxsh()
+        .current_dir(dir.path())
+        .args([
+            "-c",
+            &format!("printf \"%s\" $OXSH_ISSUE10_OPERATOR {victim_arg}"),
+        ])
+        .env("OXSH_ISSUE10_OPERATOR", ">")
+        .assert()
+        .success();
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "preserved");
+
+    oxsh()
+        .current_dir(dir.path())
+        .args(["-c", "printf '%s' redirected > actual"])
+        .assert()
+        .success();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("actual")).unwrap(),
+        "redirected"
+    );
+}
+
+#[test]
+fn issue_10_private_use_characters_are_not_internal_markers() {
+    let private_use = '\u{e000}'.to_string();
+    oxsh()
+        .args(["-c", &format!("/usr/bin/printf '%s' '{private_use}'")])
+        .assert()
+        .success()
+        .stdout(predicate::eq(private_use.clone()));
+
+    oxsh()
+        .args(["-c", "/usr/bin/printf '%s' \"$OXSH_ISSUE10_PRIVATE\""])
+        .env("OXSH_ISSUE10_PRIVATE", &private_use)
+        .assert()
+        .success()
+        .stdout(predicate::eq(private_use));
+}
+
+#[test]
+fn issue_10_alias_expansion_preserves_original_pipeline_syntax() {
+    oxsh()
+        .args(["-c", "alias p='/usr/bin/printf %s'; p hello | /usr/bin/cat"])
+        .assert()
+        .success()
+        .stdout(predicate::eq("hello"));
+}
+
+#[test]
+fn issue_10_brace_expansion_preserves_following_pipeline_syntax() {
+    oxsh()
+        .args(["-c", "/usr/bin/printf '%s' {a,b} | /usr/bin/cat"])
+        .assert()
+        .success()
+        .stdout(predicate::eq("ab"));
+}
+
+#[test]
+fn issue_10_single_quoted_assignment_values_stay_literal() {
+    oxsh()
+        .args(["-c", "V='$OXSH_ISSUE10_VALUE'; /usr/bin/printf '%s' \"$V\""])
+        .env("OXSH_ISSUE10_VALUE", "secret")
+        .assert()
+        .success()
+        .stdout(predicate::eq("$OXSH_ISSUE10_VALUE"));
+
+    oxsh()
+        .args(["-c", "V='$OXSH_ISSUE10_VALUE' /usr/bin/printenv V"])
+        .env("OXSH_ISSUE10_VALUE", "secret")
+        .assert()
+        .success()
+        .stdout(predicate::eq("$OXSH_ISSUE10_VALUE\n"));
+}
+
+#[test]
+fn issue_10_substitution_operators_do_not_redirect() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let victim = dir.path().join("victim");
+    std::fs::write(&victim, "preserved").expect("seed victim file");
+    let victim_arg = victim.to_str().unwrap();
+
+    oxsh()
+        .current_dir(dir.path())
+        .args([
+            "-c",
+            &format!("/usr/bin/printf '%s' $(/usr/bin/printf '>') {victim_arg}"),
+        ])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "preserved");
+}
+
+#[test]
+fn issue_10_substitution_output_is_not_variable_expanded_again() {
+    oxsh()
+        .args([
+            "-c",
+            "/usr/bin/printf '%s' \"$(/usr/bin/printf '$OXSH_ISSUE10_VALUE')\"",
+        ])
+        .env("OXSH_ISSUE10_VALUE", "secret")
+        .assert()
+        .success()
+        .stdout(predicate::eq("$OXSH_ISSUE10_VALUE"));
+}
+
+#[test]
+fn issue_10_quoted_command_substitution_does_not_glob() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    std::fs::write(dir.path().join("a.txt"), "a").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "b").unwrap();
+
+    oxsh()
+        .current_dir(dir.path())
+        .args([
+            "-c",
+            "/usr/bin/printf '<%s>' \"$(/usr/bin/printf '*.txt')\"",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::eq("<*.txt>"));
+}
+
+#[test]
+fn issue_10_quoted_backtick_substitution_does_not_glob() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    std::fs::write(dir.path().join("a.txt"), "a").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "b").unwrap();
+
+    oxsh()
+        .current_dir(dir.path())
+        .args([
+            "-c",
+            r#"/usr/bin/printf '<%s>' "`/usr/bin/printf '*.txt'`""#,
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::eq("<*.txt>"));
+}
+
+#[test]
+fn issue_10_mixed_fully_quoted_substitution_fragment_does_not_glob() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    std::fs::write(dir.path().join("xone.txt"), "x").unwrap();
+
+    oxsh()
+        .current_dir(dir.path())
+        .args([
+            "-c",
+            "/usr/bin/printf '<%s>' \"$(/usr/bin/printf x)\"'*.txt'",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::eq("<x*.txt>"));
+}
+
+#[test]
+fn issue_10_tilde_expansion_keeps_quoted_glob_provenance() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    std::fs::write(dir.path().join("a.txt"), "a").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "b").unwrap();
+    let expected = format!("{}/*.txt", dir.path().display());
+
+    oxsh()
+        .current_dir(dir.path())
+        .args(["-c", "/usr/bin/printf '<%s>' \"$VAR\""])
+        .env("HOME", dir.path())
+        .env("VAR", "~/*.txt")
+        .assert()
+        .success()
+        .stdout(predicate::eq(format!("<{expected}>")));
+}
+
+#[test]
 fn prints_version() {
     oxsh()
         .arg("--version")
@@ -213,4 +443,394 @@ fn partial_pipeline_consumer_does_not_hang() {
         .assert()
         .success()
         .stdout(predicate::str::contains("line1").and(predicate::str::contains("line2").not()));
+}
+
+// ── Unquoted command substitution is field-split, but never re-parsed as syntax ──
+
+#[test]
+fn issue_10_unquoted_command_substitution_is_field_split() {
+    oxsh()
+        .args([
+            "-c",
+            "/usr/bin/printf '[%s]' $(/usr/bin/printf 'a b\\tc\\nd')",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::eq("[a][b][c][d]"));
+
+    // Fields join with the surrounding word text at the edges only.
+    oxsh()
+        .args(["-c", "/usr/bin/printf '[%s]' x$(/usr/bin/printf 'a b')y"])
+        .assert()
+        .success()
+        .stdout(predicate::eq("[xa][by]"));
+
+    // Empty output produces no argument at all.
+    oxsh()
+        .args(["-c", "/usr/bin/printf '[%s]' $(true) z"])
+        .assert()
+        .success()
+        .stdout(predicate::eq("[z]"));
+}
+
+#[test]
+fn issue_10_quoted_command_substitution_is_a_single_word() {
+    oxsh()
+        .args(["-c", "/usr/bin/printf '[%s]' \"$(/usr/bin/printf 'a  b')\""])
+        .assert()
+        .success()
+        .stdout(predicate::eq("[a  b]"));
+}
+
+#[test]
+fn issue_10_split_substitution_fields_are_not_operators() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    oxsh()
+        .current_dir(dir.path())
+        .args([
+            "-c",
+            "/usr/bin/printf '[%s]' $(/usr/bin/printf '> victim | cat')",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::eq("[>][victim][|][cat]"));
+    assert!(!dir.path().join("victim").exists());
+}
+
+// ── Review follow-ups (PR #28) ──
+
+/// An empty (or whitespace-terminated) unquoted substitution must not turn the
+/// next operator into a plain argument. Data-loss reproducer from review:
+/// `rm -v $(find . -name '*.bak') > log.txt` used to delete `log.txt`.
+#[test]
+fn operators_after_empty_substitution_stay_operators() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let run = |script: &str| {
+        oxsh()
+            .current_dir(dir.path())
+            .args(["-c", script])
+            .timeout(std::time::Duration::from_secs(10))
+            .assert()
+    };
+    let read = |name: &str| std::fs::read_to_string(dir.path().join(name)).unwrap_or_default();
+
+    std::fs::write(dir.path().join("log.txt"), "important").unwrap();
+    run("rm -f $(/usr/bin/printf '') > log.txt");
+    assert!(
+        dir.path().join("log.txt").exists(),
+        "`>` after empty $(...) was passed to rm"
+    );
+
+    run("/usr/bin/printf hi $(true) > out1");
+    assert_eq!(read("out1"), "hi");
+    run("/usr/bin/printf hi `true` > out2");
+    assert_eq!(read("out2"), "hi");
+    run("/usr/bin/printf hi $(/usr/bin/printf 'x ') > out3");
+    assert_eq!(read("out3"), "hi");
+    run("/usr/bin/printf a > out4; /usr/bin/printf b $(true) >> out4");
+    assert_eq!(read("out4"), "ab");
+    run("/usr/bin/cat $(true) < out4 > out5");
+    assert_eq!(read("out5"), "ab");
+    run("ls /nonexistent-oxsh $(true) 2> err1");
+    assert!(read("err1").contains("nonexistent-oxsh"));
+    run("ls /nonexistent-oxsh $(true) 2>&1 | /usr/bin/wc -l > out6");
+    assert_eq!(read("out6").trim(), "1");
+    run("/usr/bin/printf hi $(true) | /usr/bin/tr h j > out7");
+    assert_eq!(read("out7"), "ji");
+    run("/usr/bin/printf bg $(true) &")
+        .success()
+        .stdout(predicate::str::contains("[bg] pid="));
+}
+
+/// `${VAR:-word}` is one parameter expansion even when `word` is quoted or
+/// escaped, as on main (review: `${UNSET:-'lit'}` printed `lit}`).
+#[test]
+fn braced_parameter_with_quoted_default_is_one_expansion() {
+    let cases = [
+        ("/usr/bin/printf '[%s]' ${OXSH_UNSET_X:-'lit'}", "[lit]"),
+        ("/usr/bin/printf '[%s]' ${OXSH_UNSET_X:-\\$x}", "[$x]"),
+        (
+            "/usr/bin/printf '[%s]' pre${OXSH_UNSET_X:-'x'}post",
+            "[prexpost]",
+        ),
+        ("/usr/bin/printf '[%s]' ${OXSH_UNSET_X:-\"a b\"}", "[a b]"),
+        ("/usr/bin/printf '[%s]' \"${OXSH_UNSET_X:-q}\"", "[q]"),
+        (
+            "/usr/bin/printf '[%s]' ${OXSH_UNSET_X:-$(/usr/bin/printf sub)}",
+            "[sub]",
+        ),
+        ("/usr/bin/printf '[%s]' ${OXSH_SET_X:-'no'}", "[yes]"),
+    ];
+    for (script, expected) in cases {
+        oxsh()
+            .args(["-c", script])
+            .env_remove("OXSH_UNSET_X")
+            .env("OXSH_SET_X", "yes")
+            .assert()
+            .success()
+            .stdout(predicate::eq(expected));
+    }
+}
+
+/// Alias bodies are expanded after alias substitution (POSIX order), so
+/// variables, `~` and positional parameters inside them work again.
+#[test]
+fn alias_bodies_are_expanded_after_substitution() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let home = dir.path().to_str().unwrap();
+    let cases = [
+        (
+            "alias g='/usr/bin/printf [%s] $HOME/x'; g",
+            format!("[{home}/x]"),
+        ),
+        (
+            "alias g='/usr/bin/printf [%s] ${HOME}'; g",
+            format!("[{home}]"),
+        ),
+        (
+            "X=hi; alias g='/usr/bin/printf [%s] $X'; g",
+            "[hi]".to_string(),
+        ),
+        (
+            "alias g='/usr/bin/printf [%s] ~/y'; g",
+            format!("[{home}/y]"),
+        ),
+        ("alias q='cd $HOME'; q; pwd", format!("{home}\n")),
+    ];
+    for (script, expected) in cases {
+        oxsh()
+            .current_dir("/")
+            .env("HOME", home)
+            .args(["-c", script])
+            .assert()
+            .success()
+            .stdout(predicate::eq(expected.as_str()));
+    }
+}
+
+// ── Review follow-ups, round 2 (PR #28) ──
+
+/// Inside double quotes a `'` in the word of `${VAR:-word}` is literal
+/// (POSIX, bash and main all keep it).
+#[test]
+fn braced_parameter_in_double_quotes_keeps_single_quotes() {
+    let cases = [
+        ("printf '[%s]' \"${OXSH_UNSET_X:-'lit'}\"", "['lit']"),
+        (
+            "printf '[%s]' \"pre${OXSH_UNSET_X:-'x'}post\"",
+            "[pre'x'post]",
+        ),
+        ("printf '[%s]' \"${OXSH_UNSET_X:-'a b'}\"", "['a b']"),
+        // Unquoted context still removes them.
+        ("printf '[%s]' ${OXSH_UNSET_X:-'a b'}", "[a b]"),
+    ];
+    for (script, expected) in cases {
+        oxsh()
+            .args(["-c", script])
+            .env_remove("OXSH_UNSET_X")
+            .assert()
+            .success()
+            .stdout(predicate::eq(expected));
+    }
+}
+
+/// An unterminated `${` must not run the substitutions inside it twice.
+#[test]
+fn unterminated_braced_parameter_runs_substitution_once() {
+    let scripts = [
+        "printf '[%s]' ${OXSH_UNSET_X:-$(echo x >> cnt)",
+        "printf '[%s]' ${OXSH_UNSET_X:-`echo x >> cnt`",
+        "printf '[%s]' \"${OXSH_UNSET_X:-$(echo x >> cnt)\"",
+    ];
+    for script in scripts {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let _ = oxsh()
+            .current_dir(dir.path())
+            .env_remove("OXSH_UNSET_X")
+            .args(["-c", script])
+            .assert();
+        let cnt = std::fs::read_to_string(dir.path().join("cnt")).unwrap_or_default();
+        assert_eq!(
+            cnt,
+            "x\n",
+            "substitution ran {} times for {script}",
+            cnt.lines().count()
+        );
+    }
+}
+
+/// Only a literal, unquoted, unescaped command word selects an alias
+/// (POSIX). `\ls` is the usual way to bypass an alias, and expansion or
+/// substitution results must never pick one.
+#[test]
+fn alias_lookup_uses_only_the_literal_command_word() {
+    let define = "alias oxg='printf ALIASED'; ";
+    oxsh()
+        .args(["-c", &format!("{define}oxg")])
+        .assert()
+        .stdout(predicate::eq("ALIASED"));
+    for call in [
+        "\\oxg",
+        "'oxg'",
+        "\"oxg\"",
+        "o'x'g",
+        "X=oxg; $X",
+        "$(echo oxg)",
+        "`echo oxg`",
+    ] {
+        oxsh()
+            .args(["-c", &format!("{define}{call}")])
+            .assert()
+            .stdout(predicate::str::contains("ALIASED").not());
+    }
+}
+
+/// Values reaching an alias body through variables stay data.
+#[test]
+fn alias_body_expansions_stay_data() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    oxsh()
+        .current_dir(dir.path())
+        .args(["-c", "alias g='printf [%s] $X'; X='>'; g out1"])
+        .assert()
+        .success()
+        .stdout(predicate::eq("[>][out1]"));
+    assert!(!dir.path().join("out1").exists());
+    oxsh()
+        .current_dir(dir.path())
+        .args(["-c", "alias g='printf [%s] $X'; X='$(touch pwn)'; g"])
+        .assert()
+        .success()
+        .stdout(predicate::eq("[$(touch pwn)]"));
+    assert!(!dir.path().join("pwn").exists());
+}
+
+// ── Review follow-ups, round 3 (PR #28) ──
+
+/// A backslash inside double-quoted `${...}` must never duplicate the next
+/// character; before `$ ` " \ }` it escapes, otherwise it stays literal.
+#[test]
+fn backslash_in_double_quoted_braced_parameter() {
+    let cases = [
+        (r#"printf '[%s]' "${OXSH_UNSET_X:-a\qb}""#, r"[a\qb]"),
+        (
+            r#"printf '[%s]' "${OXSH_UNSET_X:-C:\path\to}""#,
+            r"[C:\path\to]",
+        ),
+        (r#"printf '[%s]' "${OXSH_UNSET_X:-\d+}""#, r"[\d+]"),
+        (r#"printf '[%s]' "${OXSH_UNSET_X:-a\$b}""#, "[a$b]"),
+        (r#"printf '[%s]' "${OXSH_UNSET_X:-a\"b}""#, r#"[a"b]"#),
+        (r#"printf '[%s]' "${OXSH_UNSET_X:-a\\b}""#, r"[a\b]"),
+        (r#"printf '[%s]' "${OXSH_UNSET_X:-x\}}""#, "[x}]"),
+        // Unquoted context: the backslash escapes any character.
+        (r#"printf '[%s]' ${OXSH_UNSET_X:-a\qb}"#, "[aqb]"),
+    ];
+    for (script, expected) in cases {
+        oxsh()
+            .args(["-c", script])
+            .env_remove("OXSH_UNSET_X")
+            .assert()
+            .success()
+            .stdout(predicate::eq(expected));
+    }
+}
+
+/// An operator glued to the end of an expansion (`$X>`, `$(...)>`,
+/// `"..."|`) is still an operator, as in bash and (for empty values) main.
+/// Review reproducer: `rm -v $(find . -name '*.bak')> log.txt` deleted
+/// log.txt when find printed nothing.
+#[test]
+fn operator_glued_to_an_expansion_stays_an_operator() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let run = |script: &str| {
+        oxsh()
+            .current_dir(dir.path())
+            .env_remove("OXSH_UNSET_X")
+            .args(["-c", script])
+            .timeout(std::time::Duration::from_secs(10))
+            .assert()
+    };
+    let read = |name: &str| std::fs::read_to_string(dir.path().join(name)).unwrap_or_default();
+
+    for script in [
+        "rm -v $(find . -name '*.bak')> log.txt",
+        "rm -v $OXSH_UNSET_X> log.txt",
+        "rm -v ${OXSH_UNSET_X}> log.txt",
+    ] {
+        std::fs::write(dir.path().join("log.txt"), "important").unwrap();
+        run(script);
+        assert!(
+            dir.path().join("log.txt").exists(),
+            "{script} deleted log.txt"
+        );
+    }
+
+    run("printf hi $(true)> out1");
+    assert_eq!(read("out1"), "hi");
+    run("printf hi `true`> out2");
+    assert_eq!(read("out2"), "hi");
+    run("printf hi $OXSH_UNSET_X> out3");
+    assert_eq!(read("out3"), "hi");
+    run("printf a > out4; printf b ${OXSH_UNSET_X}>> out4");
+    assert_eq!(read("out4"), "ab");
+    run("printf hi $(true)| tr h j > out5");
+    assert_eq!(read("out5"), "ji");
+    run("cat $(true)< out4 > out6");
+    assert_eq!(read("out6"), "ab");
+    // Non-empty output: the operator still ends the word, as in bash.
+    run("printf %s $(echo x)> out7");
+    assert_eq!(read("out7"), "x");
+    run("printf %s \"q\"> out8");
+    assert_eq!(read("out8"), "q");
+    run("printf bg $(true)&")
+        .success()
+        .stdout(predicate::str::contains("[bg] pid="));
+    // Substitution output is still never an operator.
+    run("printf '[%s]' $(echo '>') out9");
+    assert!(!dir.path().join("out9").exists());
+}
+
+/// An empty substitution glued to a command word does not make the word
+/// eligible for alias lookup (`$(true)g` is not the literal word `g`).
+#[test]
+fn empty_substitution_prefix_does_not_select_an_alias() {
+    for call in ["$(true)oxg", "`true`oxg", "${OXSH_UNSET_X}oxg"] {
+        oxsh()
+            .env_remove("OXSH_UNSET_X")
+            .args(["-c", &format!("alias oxg='printf ALIASED'; {call}")])
+            .assert()
+            .stdout(predicate::str::contains("ALIASED").not());
+    }
+}
+
+#[test]
+fn unquoted_empty_expansion_is_removed() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let run = |script: &str| {
+        oxsh()
+            .current_dir(dir.path())
+            .env_remove("OXSH_UNSET_X")
+            .args(["-c", script])
+            .timeout(std::time::Duration::from_secs(10))
+            .assert()
+    };
+    let read = |name: &str| std::fs::read_to_string(dir.path().join(name)).unwrap_or_default();
+
+    // An unquoted expansion that is empty produces no argument at all.
+    run("printf '[%s]' a $OXSH_UNSET_X b").stdout("[a][b]");
+    run("printf '[%s]' a ${OXSH_UNSET_X} b").stdout("[a][b]");
+    run("printf '[%s]' a $OXSH_UNSET_X").stdout("[a]");
+    run("printf '[%s]' a $OXSH_UNSET_X> out1");
+    assert_eq!(read("out1"), "[a]");
+    run("printf '[%s]' a $OXSH_UNSET_X| tr a b > out2");
+    assert_eq!(read("out2"), "[b]");
+    run("$OXSH_UNSET_X").success().stdout("");
+    // Any quoting keeps the (empty) argument.
+    run("printf '[%s]' a \"$OXSH_UNSET_X\" b").stdout("[a][][b]");
+    run("printf '[%s]' a \"\"$OXSH_UNSET_X b").stdout("[a][][b]");
+    run("printf '[%s]' a '' b").stdout("[a][][b]");
+    // A redirect target is never dropped, so it cannot silently swallow
+    // the next word.
+    run("printf hi > $OXSH_UNSET_X out3");
+    assert_eq!(read("out3"), "");
 }
