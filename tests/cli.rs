@@ -607,3 +607,74 @@ fn alias_bodies_are_expanded_after_substitution() {
             .stdout(predicate::eq(expected.as_str()));
     }
 }
+
+// ── Review follow-ups, round 2 (PR #28) ──
+
+/// Inside double quotes a `'` in the word of `${VAR:-word}` is literal
+/// (POSIX, bash and main all keep it).
+#[test]
+fn braced_parameter_in_double_quotes_keeps_single_quotes() {
+    let cases = [
+        ("printf '[%s]' \"${OXSH_UNSET_X:-'lit'}\"", "['lit']"),
+        (
+            "printf '[%s]' \"pre${OXSH_UNSET_X:-'x'}post\"",
+            "[pre'x'post]",
+        ),
+        ("printf '[%s]' \"${OXSH_UNSET_X:-'a b'}\"", "['a b']"),
+        // Unquoted context still removes them.
+        ("printf '[%s]' ${OXSH_UNSET_X:-'a b'}", "[a b]"),
+    ];
+    for (script, expected) in cases {
+        oxsh()
+            .args(["-c", script])
+            .env_remove("OXSH_UNSET_X")
+            .assert()
+            .success()
+            .stdout(predicate::eq(expected));
+    }
+}
+
+/// An unterminated `${` must not run the substitutions inside it twice.
+#[test]
+fn unterminated_braced_parameter_runs_substitution_once() {
+    let scripts = [
+        "printf '[%s]' ${OXSH_UNSET_X:-$(echo x >> cnt)",
+        "printf '[%s]' ${OXSH_UNSET_X:-`echo x >> cnt`",
+        "printf '[%s]' \"${OXSH_UNSET_X:-$(echo x >> cnt)\"",
+    ];
+    for script in scripts {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let _ = oxsh()
+            .current_dir(dir.path())
+            .env_remove("OXSH_UNSET_X")
+            .args(["-c", script])
+            .assert();
+        let cnt = std::fs::read_to_string(dir.path().join("cnt")).unwrap_or_default();
+        assert_eq!(
+            cnt,
+            "x\n",
+            "substitution ran {} times for {script}",
+            cnt.lines().count()
+        );
+    }
+}
+
+/// Values reaching an alias body through variables stay data.
+#[test]
+fn alias_body_expansions_stay_data() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    oxsh()
+        .current_dir(dir.path())
+        .args(["-c", "alias g='printf [%s] $X'; X='>'; g out1"])
+        .assert()
+        .success()
+        .stdout(predicate::eq("[>][out1]"));
+    assert!(!dir.path().join("out1").exists());
+    oxsh()
+        .current_dir(dir.path())
+        .args(["-c", "alias g='printf [%s] $X'; X='$(touch pwn)'; g"])
+        .assert()
+        .success()
+        .stdout(predicate::eq("[$(touch pwn)]"));
+    assert!(!dir.path().join("pwn").exists());
+}

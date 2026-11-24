@@ -84,7 +84,7 @@ pub fn tokenize_words(input: &str) -> Vec<Word> {
             continue;
         }
         if !in_single && ch == '$' && chars.get(i + 1) == Some(&'{') {
-            if let Some((text, end)) = lex_braced_parameter(&chars, i) {
+            if let Some((text, end)) = lex_braced_parameter(&chars, i, in_double) {
                 push_text_fragment(&mut current, &text, true);
                 operator_eligible = false;
                 if !in_double {
@@ -269,42 +269,85 @@ fn finish_word(
 }
 
 /// Lex `${...}` starting at `chars[start]` (the `$`) into a single piece of
-/// text for parameter expansion. Inside the braces, quotes are removed,
-/// backslash escapes keep the escaped character, and `$(...)`/backticks are
-/// substituted, matching how main treated the whole word before expansion
-/// (e.g. `${UNSET:-'lit'}` -> `lit`). Returns the text and the index of the
-/// closing `}`, or `None` if there is no closing brace.
-fn lex_braced_parameter(chars: &[char], start: usize) -> Option<(String, usize)> {
-    let mut text = String::from("${");
+/// text for parameter expansion. Returns the text and the index of the
+/// closing `}`, or `None` if there is no closing brace (then nothing has been
+/// executed, and the caller lexes the characters normally).
+///
+/// Inside the braces quotes are removed and `$(...)`/backticks are
+/// substituted, as main did for the whole word before expansion
+/// (`${UNSET:-'lit'}` -> `lit`). When the `${` itself is inside double quotes
+/// (`in_double`), `'` is an ordinary character and `\` only escapes
+/// `` $ ` " \ } ``, as POSIX specifies (`"${UNSET:-'lit'}"` -> `'lit'`).
+fn lex_braced_parameter(chars: &[char], start: usize, in_double: bool) -> Option<(String, usize)> {
+    // Locate the closing brace first, so substitutions only ever run once.
+    let end = scan_braced_parameter(chars, start, in_double, None)?;
+    let mut text = String::new();
+    scan_braced_parameter(chars, start, in_double, Some(&mut text));
+    Some((text, end))
+}
+
+/// Walk `${...}` from `chars[start]`. With `out`, append the lexed text and
+/// run substitutions; without it, only find the closing `}`.
+fn scan_braced_parameter(
+    chars: &[char],
+    start: usize,
+    in_double: bool,
+    mut out: Option<&mut String>,
+) -> Option<usize> {
+    let execute = out.is_some();
+    let mut emit = |text: &str| {
+        if let Some(out) = out.as_deref_mut() {
+            out.push_str(text);
+        }
+    };
+    emit("${");
     let mut single = false;
-    let mut double = false;
+    let mut double = in_double;
     let mut i = start + 2;
     while i < chars.len() {
         let ch = chars[i];
+        if single {
+            if ch == '\'' {
+                single = false;
+            } else {
+                emit(ch.encode_utf8(&mut [0; 4]));
+            }
+            i += 1;
+            continue;
+        }
         match ch {
-            '}' if !single && !double => {
-                text.push('}');
-                return Some((text, i));
+            '}' if double == in_double => {
+                emit("}");
+                return Some(i);
             }
-            '\'' if !double => single = !single,
-            '"' if !single => double = !double,
-            '\\' if !single => {
-                i += 1;
-                text.push(*chars.get(i)?);
+            '\'' if !double => single = true,
+            '"' => double = !double,
+            '\\' => {
+                let next = *chars.get(i + 1)?;
+                if double && !matches!(next, '$' | '`' | '"' | '\\' | '}') {
+                    emit("\\");
+                } else {
+                    i += 1;
+                }
+                emit(next.encode_utf8(&mut [0; 4]));
             }
-            '$' if !single && chars.get(i + 1) == Some(&'(') => {
+            '$' if chars.get(i + 1) == Some(&'(') => {
                 let end = find_subshell_end(chars, i + 2)?;
-                let command: String = chars[i + 2..end].iter().collect();
-                text.push_str(&run_subshell(&command));
+                if execute {
+                    let command: String = chars[i + 2..end].iter().collect();
+                    emit(&run_subshell(&command));
+                }
                 i = end;
             }
-            '`' if !single => {
+            '`' => {
                 let end = (i + 1..chars.len()).find(|&j| chars[j] == '`')?;
-                let command: String = chars[i + 1..end].iter().collect();
-                text.push_str(&run_subshell(&command));
+                if execute {
+                    let command: String = chars[i + 1..end].iter().collect();
+                    emit(&run_subshell(&command));
+                }
                 i = end;
             }
-            _ => text.push(ch),
+            _ => emit(ch.encode_utf8(&mut [0; 4])),
         }
         i += 1;
     }
