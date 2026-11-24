@@ -659,6 +659,32 @@ fn unterminated_braced_parameter_runs_substitution_once() {
     }
 }
 
+/// Only a literal, unquoted, unescaped command word selects an alias
+/// (POSIX). `\ls` is the usual way to bypass an alias, and expansion or
+/// substitution results must never pick one.
+#[test]
+fn alias_lookup_uses_only_the_literal_command_word() {
+    let define = "alias oxg='printf ALIASED'; ";
+    oxsh()
+        .args(["-c", &format!("{define}oxg")])
+        .assert()
+        .stdout(predicate::eq("ALIASED"));
+    for call in [
+        "\\oxg",
+        "'oxg'",
+        "\"oxg\"",
+        "o'x'g",
+        "X=oxg; $X",
+        "$(echo oxg)",
+        "`echo oxg`",
+    ] {
+        oxsh()
+            .args(["-c", &format!("{define}{call}")])
+            .assert()
+            .stdout(predicate::str::contains("ALIASED").not());
+    }
+}
+
 /// Values reaching an alias body through variables stay data.
 #[test]
 fn alias_body_expansions_stay_data() {

@@ -7,6 +7,10 @@ pub struct Word {
     pub fragments: Vec<Fragment>,
     pub operator: bool,
     pub fully_quoted: bool,
+    /// Made only of unquoted, unescaped literal characters (no quoting,
+    /// escapes, `${...}` or substitution output). Only such a command word
+    /// may name an alias.
+    pub plain: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -31,6 +35,7 @@ impl Word {
             }],
             operator: false,
             fully_quoted: false,
+            plain: false,
         }
     }
 }
@@ -64,6 +69,7 @@ pub fn tokenize_words(input: &str) -> Vec<Word> {
         fragments: Vec::new(),
         operator: false,
         fully_quoted: false,
+        plain: false,
     };
     let mut in_single = false;
     let mut in_double = false;
@@ -263,6 +269,7 @@ fn finish_word(
         fragments: std::mem::take(&mut word.fragments),
         operator: operator_eligible && is_shell_operator(&text),
         fully_quoted,
+        plain: operator_eligible,
     });
     word.operator = false;
     word.fully_quoted = false;
@@ -413,6 +420,9 @@ fn resolve_word_aliases_depth(
     depth: usize,
 ) {
     if words.is_empty() || depth > 16 {
+        return;
+    }
+    if !words[0].plain {
         return;
     }
     let name = words[0].text();
@@ -572,6 +582,7 @@ fn extract_redirects(
                 }],
                 operator,
                 fully_quoted: false,
+                plain: false,
             }
         })
         .collect();
