@@ -450,7 +450,7 @@ fn gen_soup(r: &mut Rng) -> Vec<u8> {
     let mut s = String::from(*r.pick(PREFIXES));
     let n = 1 + r.below(env_u64("OXSH_FUZZ_MAX_LEN", 40) as usize);
     for _ in 0..n {
-        s.push_str(*r.pick(SOUP));
+        s.push_str(r.pick::<&str>(SOUP));
     }
     s.into_bytes()
 }
@@ -479,7 +479,7 @@ fn gen_unterminated_quote(r: &mut Rng) -> Vec<u8> {
     let k = 1 + r.below(4);
     let mut s = format!("{}{} {}", pre, plain(r, k), q);
     for _ in 0..1 + r.below(8) {
-        s.push_str(*r.pick(inner));
+        s.push_str(r.pick::<&str>(inner));
     }
     s.into_bytes()
 }
@@ -510,7 +510,7 @@ fn gen_once(r: &mut Rng) -> Vec<u8> {
     let pre = *r.pick(PREFIXES);
     let mut s = format!("{}{}/bin/echo x >> S1{}", pre, open, close);
     for _ in 0..r.below(4) {
-        s.push_str(*r.pick(&[
+        s.push_str(r.pick::<&str>(&[
             " a", " }", " )", " ${U", " $(", " \"", " '", " `", ";", " && true",
         ]));
     }
@@ -542,7 +542,7 @@ fn gen_data(r: &mut Rng) -> Vec<u8> {
     let n = r.below(40);
     let mut v: Vec<u8> = (0..n).map(|_| DATA[r.below(DATA.len())]).collect();
     if r.below(4) == 0 {
-        v.extend_from_slice(*r.pick(&[
+        v.extend_from_slice(r.pick::<&[u8]>(&[
             &b"$HOME"[..],
             b"$(touch P)",
             b"`touch P`",
