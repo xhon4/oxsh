@@ -1,34 +1,26 @@
 # CI baseline for https://github.com/xhon4/oxsh/issues/27
 #
 # What this workflow claims, and what it does not:
-# - Linux (ubuntu-latest): build, test, and Clippy are required. The test
-#   suite has also been run locally in bubblewrap.
-# - rustfmt is a baseline, not a required gate: main has preexisting
-#   rustfmt drift (67 hunks in 14 files on 50b0428). The job reports the
-#   drift as a warning and a step summary, then exits 0 so the check is
-#   not a red X. A dedicated formatting PR should make this required later.
-#   This PR does not reformat the tree (it would collide with other open work).
-# - macOS: compile-only (`cargo check`). Verified on GitHub Actions
-#   (run 45323378507, macos-26-arm64, rustc 1.100.0). Functional tests
-#   are not run.
-# - Windows: compile-only. `main` does not compile (#30: `unix_setup` is
-#   referenced under `cfg!(windows)` in src/setup.rs). The known #30
-#   failure is reported as a warning (and a step summary that links #30)
-#   and the job exits 0 so it is not a red X. A compile error that is not
-#   #30 still fails the job. Confirmed on windows-2025-vs2026 / rustc 1.100.0
-#   MSVC in run 45323378507. Functional tests are not run.
+# - Linux (ubuntu-latest): build, test, and Clippy are required. This is the
+#   only platform on which the test suite has been run locally.
+# - rustfmt is non-blocking: main has 67 preexisting rustfmt hunks in 14
+#   files. A dedicated formatting PR should make this required later. This
+#   PR does not reformat the tree (it would collide with other open work).
+# - macOS: compile-only (`cargo check`). Functional tests are not run, and
+#   compile success is not claimed until this job has actually passed in
+#   GitHub Actions.
+# - Windows: compile-only, allowed to fail. `main` does not compile for
+#   Windows (#30: `unix_setup` is referenced under `cfg!(windows)` in
+#   src/setup.rs). Do not treat a red Windows job as a regression until #30
+#   is fixed and `continue-on-error` is removed.
 # - PTY tests (tests/interactive_signals.rs) are `cfg(target_os = "linux")`.
 #   They open their own PTY via posix_openpt; they do not need the runner's
-#   stdin to be a TTY. They passed locally inside bubblewrap with /dev/ptmx,
-#   and in the Linux test jobs of run 45323378507.
+#   stdin to be a TTY. They passed locally inside bubblewrap with /dev/ptmx.
 #
 # Actions are official: actions/checkout@v7, dtolnay/rust-toolchain@stable
 # and @1.88.0 (the @rev selects the toolchain; see the action README).
 # Permissions are contents: read only. No paid services; this repository
 # is public, so GitHub-hosted runners are free.
-#
-# Job names that mention an issue must be quoted: an unquoted `#30` is a
-# YAML comment and will truncate the name.
 
 name: CI
 
@@ -89,45 +81,17 @@ jobs:
     name: rustfmt (non-blocking baseline)
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Do not use job-level continue-on-error: that still concludes the job as
-    # failure and paints a red X on the PR (seen on run 45323378507).
+    # Preexisting drift on main: 67 hunks across 14 src/*.rs files
+    # (`cargo fmt --all -- --check` on 50b0428). Keep this job visible but
+    # non-blocking until a dedicated formatting PR lands.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: Report rustfmt drift (job stays green)
-        run: |
-          set +e
-          cargo fmt --all -- --check > rustfmt-check.log 2>&1
-          status=$?
-          set -e
-          cat rustfmt-check.log
-          if [ "$status" -eq 0 ]; then
-            {
-              echo "## rustfmt"
-              echo
-              echo "\`cargo fmt --all -- --check\` is clean. This job can be made required."
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          if [ "$status" -ne 1 ]; then
-            echo "::error::cargo fmt --check exited ${status} (not a formatting-diff failure)"
-            exit "$status"
-          fi
-          hunks=$(grep -c '^Diff in ' rustfmt-check.log || true)
-          files=$(grep '^Diff in ' rustfmt-check.log | sed 's/^Diff in //; s/:.*//' | sort -u | wc -l | tr -d ' ')
-          {
-            echo "## rustfmt: formatting drift exists"
-            echo
-            echo "\`cargo fmt --all -- --check\` found **${hunks} hunks** in **${files} files**."
-            echo "This is preexisting drift, not a new required gate. A dedicated formatting PR should make this check required."
-            echo
-            echo "Files:"
-            grep '^Diff in ' rustfmt-check.log | sed 's/^Diff in //; s/:.*//' | sort -u | sed 's/^/- \`/' | sed 's/$/\`/'
-          } >> "$GITHUB_STEP_SUMMARY"
-          echo "::warning title=Formatting drift exists::cargo fmt --check found ${hunks} hunks in ${files} files. Preexisting; a dedicated formatting PR should make this job required."
-          exit 0
+      - name: rustfmt --check (expected to fail until a formatting PR)
+        run: cargo fmt --all -- --check
 
   compile-macos:
     name: macOS compile only (not functionally tested)
@@ -140,46 +104,14 @@ jobs:
         run: cargo check --locked --all-targets
 
   compile-windows:
-    name: "Windows compile only (known failure; see #30)"
+    name: Windows compile only (allowed to fail; see #30)
     runs-on: windows-latest
     timeout-minutes: 20
-    # The known #30 failure is reported as a warning; the job exits 0 so it
-    # does not show a red X. An unexpected compile error still fails the job.
-    # Remove this soft-success path when #30 is fixed.
+    # Preexisting compile error on main: #30 (src/setup.rs, unix_setup).
+    # Remove continue-on-error when #30 is fixed.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - name: Check and report #30 without a red X
-        shell: bash
-        run: |
-          set +e
-          cargo check --locked --all-targets > check-win.log 2>&1
-          status=$?
-          set -e
-          cat check-win.log
-          if [ "$status" -eq 0 ]; then
-            {
-              echo "## Windows compile succeeded"
-              echo
-              echo "\`cargo check --locked --all-targets\` passed on windows-latest. Remove this soft-success path and treat the job as required; update or close #30."
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "::notice title=Windows compile succeeded::cargo check passed on windows-latest. The soft-success path can be removed; see https://github.com/xhon4/oxsh/issues/30"
-            exit 0
-          fi
-          if grep -q 'cannot find function `unix_setup`' check-win.log && grep -q 'setup.rs' check-win.log; then
-            {
-              echo "## Windows compile failed (expected; see #30)"
-              echo
-              echo "\`cargo check --locked --all-targets\` failed on windows-latest with the preexisting bug in [#30](https://github.com/xhon4/oxsh/issues/30): \`unix_setup\` is still type-checked under \`cfg!(windows)\` (\`src/setup.rs:14\`, \`error[E0425]\`)."
-              echo
-              echo "This job concludes success so the known failure does not show as a red X. Remove the soft-success path when #30 is fixed."
-              echo
-              echo '```'
-              grep -E 'error(\[E[0-9]+\])?:|--> src|warning: unused' check-win.log | head -40
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "::warning file=src/setup.rs,line=14,title=Windows does not compile (see #30)::error[E0425]: cannot find function unix_setup in this scope. Preexisting; https://github.com/xhon4/oxsh/issues/30"
-            exit 0
-          fi
-          echo "::error title=Unexpected Windows compile failure::cargo check failed with an error that is not the known #30 unix_setup issue. See the log."
-          exit "$status"
+      - name: Check
+        run: cargo check --locked --all-targets
