@@ -157,6 +157,35 @@ fn builtin_with_pipe_or_redirect_is_an_explicit_error() {
 }
 
 #[test]
+fn redirect_target_must_be_exactly_one_field() {
+    // D4: zero or several fields are an ambiguous redirect; nothing runs or is written (I5).
+    for script in [
+        "/bin/echo x > $(printf 'p q')",
+        "/bin/echo x > $(true) b.txt",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("b.txt"), "KEEP\n").unwrap();
+        oxsh()
+            .current_dir(dir.path())
+            .args(["-c", script])
+            .assert()
+            .code(1)
+            .stdout("")
+            .stderr(predicate::str::contains("ambiguous redirect"));
+        let mut names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["b.txt"], "{script}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("b.txt")).unwrap(),
+            "KEEP\n"
+        );
+    }
+}
+
+#[test]
 fn variable_values_are_not_expanded_twice() {
     // $FOO resolves to the literal "$BAR"; that result must NOT be expanded again.
     oxsh()

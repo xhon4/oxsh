@@ -245,3 +245,39 @@ fn ctrl_c_during_command_substitution_aborts_the_command() {
         "loop body command ran after ^C interrupted its $(...)"
     );
 }
+
+/// Interrupt one `$(...)` of a line, then check what the rest of the line did.
+fn interrupt(sh: &mut Session, line: &str) {
+    sh.send(format!("{line}\r").as_bytes());
+    std::thread::sleep(Duration::from_millis(500));
+    sh.send(b"\x03");
+}
+
+/// Ctrl-C during a substitution abandons the whole line (spec decisions 6 and
+/// 12, invariant I4): assignments are not committed, an env-prefixed command
+/// and later substitutions never run, and alias bodies abort the same way.
+#[test]
+fn ctrl_c_in_a_substitution_commits_nothing() {
+    let mut sh = Session::start();
+    sh.run_marked("X=old; echo READY\"_\"3", "READY_3");
+
+    // `X=$(slow)` keeps the old value (intentional difference: bash commits "").
+    interrupt(&mut sh, "X=$(sleep 5)");
+    sh.run_marked("echo KEPT\"_\"[$X]\"_\"$?", "KEPT_[old]_130");
+
+    // An env-prefix whose value is interrupted does not run its command.
+    interrupt(&mut sh, "Y=$(sleep 5) touch prefixed");
+    sh.run_marked("test -e prefixed; echo PREFIX\"_\"$?", "PREFIX_1");
+
+    // Substitutions after the interrupted one do not run.
+    interrupt(&mut sh, "/bin/echo $(sleep 5) $(touch later)");
+    sh.run_marked("test -e later; echo LATER\"_\"$?", "LATER_1");
+
+    // Nor does the rest of the line after an interrupted alias body.
+    sh.run_marked(
+        "alias slow='/bin/echo $(sleep 5)'; echo ALIAS\"_\"SET",
+        "ALIAS_SET",
+    );
+    interrupt(&mut sh, "slow; touch after_alias");
+    sh.run_marked("test -e after_alias; echo ALIASED\"_\"$?", "ALIASED_1");
+}
