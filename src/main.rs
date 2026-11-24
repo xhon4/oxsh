@@ -3,6 +3,7 @@ mod completer;
 mod config;
 mod context;
 mod executor;
+mod expand;
 mod highlight;
 mod parser;
 mod prompt;
@@ -10,6 +11,7 @@ mod scripting;
 mod setup;
 mod shell;
 mod structured;
+mod syntax;
 mod value;
 
 use completer::OxshCompleter;
@@ -133,8 +135,13 @@ fn main() {
 
     // Run on_startup commands (e.g., fastfetch) — while PATH scan runs in parallel
     for cmd in &config.on_startup {
-        let pipeline = parser::parse_pipeline(cmd);
-        executor::execute_pipeline(pipeline);
+        // D-START: literal words, no expansion (main's meaning), typed operators.
+        match shell::literal_commands(cmd) {
+            Ok(pipeline) => {
+                executor::execute_pipeline(pipeline);
+            }
+            Err(e) => eprintln!("oxsh: on_startup: syntax error: {e}"),
+        }
     }
 
     // Setup history

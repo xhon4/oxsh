@@ -137,7 +137,23 @@ fn explain_identifies_builtins() {
 #[test]
 fn trailing_pipe_exits_cleanly() {
     // Empty trailing stage must not hang or leave the upstream child unwaited.
-    oxsh().args(["-c", "echo hi |"]).assert().success();
+    // The builtin `echo` with a pipe is a D5 error since PR-A (#10, #11), so
+    // the intent (no hang, upstream child waited) is kept with /bin/echo.
+    oxsh().args(["-c", "/bin/echo hi |"]).assert().success();
+}
+
+#[test]
+fn builtin_with_pipe_or_redirect_is_an_explicit_error() {
+    // D5: the builtin does not run and nothing is written (I5).
+    let dir = tempfile::tempdir().unwrap();
+    oxsh()
+        .current_dir(dir.path())
+        .args(["-c", "echo hi > out.txt"])
+        .assert()
+        .code(1)
+        .stdout("")
+        .stderr(predicate::str::contains("not supported for builtins"));
+    assert!(!dir.path().join("out.txt").exists());
 }
 
 #[test]
