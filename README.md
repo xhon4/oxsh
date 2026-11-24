@@ -68,7 +68,7 @@ oxsh is not a full POSIX shell yet. Notable gaps, most of them tracked in the [i
 - A glob in a `for` list (`for f in *.log`) is passed as a single item.
 - Only a trailing `&` starts a background job, and there is no job control yet.
 
-**Platforms**: developed and tested on Linux. The code includes macOS and Windows support, but those platforms are not yet verified in CI ([#27](https://github.com/xhon4/oxsh/issues/27)).
+**Platforms**: developed and tested on Linux (CI builds and runs the test suite on Ubuntu). macOS has a compile-only CI job and is not functionally tested. Windows does not currently compile ([#30](https://github.com/xhon4/oxsh/issues/30)); the Windows job is compile-only and allowed to fail. Neither macOS nor Windows has been functionally verified.
 
 ### 🛠️ Built-in Commands
 

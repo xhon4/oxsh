@@ -1,0 +1,117 @@
+# CI baseline for https://github.com/xhon4/oxsh/issues/27
+#
+# What this workflow claims, and what it does not:
+# - Linux (ubuntu-latest): build, test, and Clippy are required. This is the
+#   only platform on which the test suite has been run locally.
+# - rustfmt is non-blocking: main has 67 preexisting rustfmt hunks in 14
+#   files. A dedicated formatting PR should make this required later. This
+#   PR does not reformat the tree (it would collide with other open work).
+# - macOS: compile-only (`cargo check`). Functional tests are not run, and
+#   compile success is not claimed until this job has actually passed in
+#   GitHub Actions.
+# - Windows: compile-only, allowed to fail. `main` does not compile for
+#   Windows (#30: `unix_setup` is referenced under `cfg!(windows)` in
+#   src/setup.rs). Do not treat a red Windows job as a regression until #30
+#   is fixed and `continue-on-error` is removed.
+# - PTY tests (tests/interactive_signals.rs) are `cfg(target_os = "linux")`.
+#   They open their own PTY via posix_openpt; they do not need the runner's
+#   stdin to be a TTY. They passed locally inside bubblewrap with /dev/ptmx.
+#
+# Actions are official: actions/checkout@v7, dtolnay/rust-toolchain@stable
+# and @1.88.0 (the @rev selects the toolchain; see the action README).
+# Permissions are contents: read only. No paid services; this repository
+# is public, so GitHub-hosted runners are free.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test-linux:
+    name: Linux tests (stable)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --locked --all-targets
+      - name: Test
+        run: cargo test --locked
+
+  msrv:
+    name: Linux MSRV 1.88.0
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - name: Test on the verified MSRV
+        run: cargo test --locked
+
+  clippy:
+    name: Linux Clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      # -D warnings is used because `cargo clippy --locked --all-targets -- -D warnings`
+      # is clean on main (50b0428) with rustc 1.100.0, aside from the preexisting
+      # cargo manifest warning `package.homepage` (not a rustc/clippy lint).
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  rustfmt:
+    name: rustfmt (non-blocking baseline)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Preexisting drift on main: 67 hunks across 14 src/*.rs files
+    # (`cargo fmt --all -- --check` on 50b0428). Keep this job visible but
+    # non-blocking until a dedicated formatting PR lands.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: rustfmt --check (expected to fail until a formatting PR)
+        run: cargo fmt --all -- --check
+
+  compile-macos:
+    name: macOS compile only (not functionally tested)
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check
+        run: cargo check --locked --all-targets
+
+  compile-windows:
+    name: Windows compile only (allowed to fail; see #30)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    # Preexisting compile error on main: #30 (src/setup.rs, unix_setup).
+    # Remove continue-on-error when #30 is fixed.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check
+        run: cargo check --locked --all-targets
