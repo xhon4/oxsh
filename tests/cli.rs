@@ -802,3 +802,35 @@ fn empty_substitution_prefix_does_not_select_an_alias() {
             .stdout(predicate::str::contains("ALIASED").not());
     }
 }
+
+#[test]
+fn unquoted_empty_expansion_is_removed() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let run = |script: &str| {
+        oxsh()
+            .current_dir(dir.path())
+            .env_remove("OXSH_UNSET_X")
+            .args(["-c", script])
+            .timeout(std::time::Duration::from_secs(10))
+            .assert()
+    };
+    let read = |name: &str| std::fs::read_to_string(dir.path().join(name)).unwrap_or_default();
+
+    // An unquoted expansion that is empty produces no argument at all.
+    run("printf '[%s]' a $OXSH_UNSET_X b").stdout("[a][b]");
+    run("printf '[%s]' a ${OXSH_UNSET_X} b").stdout("[a][b]");
+    run("printf '[%s]' a $OXSH_UNSET_X").stdout("[a]");
+    run("printf '[%s]' a $OXSH_UNSET_X> out1");
+    assert_eq!(read("out1"), "[a]");
+    run("printf '[%s]' a $OXSH_UNSET_X| tr a b > out2");
+    assert_eq!(read("out2"), "[b]");
+    run("$OXSH_UNSET_X").success().stdout("");
+    // Any quoting keeps the (empty) argument.
+    run("printf '[%s]' a \"$OXSH_UNSET_X\" b").stdout("[a][][b]");
+    run("printf '[%s]' a \"\"$OXSH_UNSET_X b").stdout("[a][][b]");
+    run("printf '[%s]' a '' b").stdout("[a][][b]");
+    // A redirect target is never dropped, so it cannot silently swallow
+    // the next word.
+    run("printf hi > $OXSH_UNSET_X out3");
+    assert_eq!(read("out3"), "");
+}

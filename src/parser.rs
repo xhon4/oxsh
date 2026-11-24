@@ -11,6 +11,9 @@ pub struct Word {
     /// escapes, `${...}` or substitution output). Only such a command word
     /// may name an alias.
     pub plain: bool,
+    /// Unquoted and built only from expansions/literals: if it expands to
+    /// nothing it yields no argument at all (POSIX field removal).
+    pub drop_if_empty: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -36,6 +39,7 @@ impl Word {
             operator: false,
             fully_quoted: false,
             plain: false,
+            drop_if_empty: false,
         }
     }
 }
@@ -70,6 +74,7 @@ pub fn tokenize_words(input: &str) -> Vec<Word> {
         operator: false,
         fully_quoted: false,
         plain: false,
+        drop_if_empty: false,
     };
     let mut in_single = false;
     let mut in_double = false;
@@ -192,6 +197,7 @@ pub fn tokenize_words(input: &str) -> Vec<Word> {
                         was_quoted && !has_unquoted_char,
                         operator_eligible,
                         literal_word,
+                        !was_quoted,
                     );
                     was_quoted = false;
                     has_unquoted_char = false;
@@ -216,6 +222,7 @@ pub fn tokenize_words(input: &str) -> Vec<Word> {
                     was_quoted && !has_unquoted_char,
                     false,
                     false,
+                    !was_quoted,
                 );
                 was_quoted = false;
                 operator_eligible = true;
@@ -242,6 +249,7 @@ pub fn tokenize_words(input: &str) -> Vec<Word> {
             was_quoted && !has_unquoted_char,
             operator_eligible,
             literal_word,
+            !was_quoted,
         );
     }
     tokens
@@ -279,7 +287,7 @@ fn push_split_substitution(
     }
     for field in fields {
         if !current.fragments.is_empty() || *was_quoted {
-            finish_word(tokens, current, false, false, false);
+            finish_word(tokens, current, false, false, false, false);
             *was_quoted = false;
         }
         *has_unquoted_char = true;
@@ -311,6 +319,7 @@ fn finish_word(
     fully_quoted: bool,
     operator_eligible: bool,
     literal: bool,
+    drop_if_empty: bool,
 ) {
     let text = word.text();
     tokens.push(Word {
@@ -318,9 +327,22 @@ fn finish_word(
         operator: operator_eligible && is_shell_operator(&text),
         fully_quoted,
         plain: literal,
+        drop_if_empty,
     });
     word.operator = false;
     word.fully_quoted = false;
+}
+
+/// Remove unquoted words whose expansion is empty (`a $UNSET b` has two
+/// arguments, as in POSIX shells). A redirect target is kept, so an empty one
+/// still fails instead of taking the next word as the target.
+pub fn remove_empty_fields(words: &mut Vec<Word>) {
+    let mut redirect_target = false;
+    words.retain(|word| {
+        let keep = redirect_target || !word.drop_if_empty || !word.text().is_empty();
+        redirect_target = word.operator && word.text().contains(['<', '>']);
+        keep
+    });
 }
 
 /// Lex `${...}` starting at `chars[start]` (the `$`) into a single piece of
@@ -630,6 +652,7 @@ fn extract_redirects(
                 operator,
                 fully_quoted: false,
                 plain: false,
+                drop_if_empty: false,
             }
         })
         .collect();

@@ -85,6 +85,7 @@ fn expand_and_resolve(
     // words an alias body contributes get `$VAR`, `${VAR}`, `~` expanded too.
     parser::resolve_word_aliases(&mut words, aliases);
     expand_word_fragments(&mut words, shell_vars);
+    parser::remove_empty_fields(&mut words);
     parser::expand_brace_words(&mut words);
     if glob {
         parser::expand_glob_words(&mut words);
