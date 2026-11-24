@@ -333,9 +333,8 @@ fn scan_braced_parameter(
                 let next = *chars.get(i + 1)?;
                 if double && !matches!(next, '$' | '`' | '"' | '\\' | '}') {
                     emit("\\");
-                } else {
-                    i += 1;
                 }
+                i += 1;
                 emit(next.encode_utf8(&mut [0; 4]));
             }
             '$' if chars.get(i + 1) == Some(&'(') => {

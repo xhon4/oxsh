@@ -704,3 +704,33 @@ fn alias_body_expansions_stay_data() {
         .stdout(predicate::eq("[$(touch pwn)]"));
     assert!(!dir.path().join("pwn").exists());
 }
+
+// ── Review follow-ups, round 3 (PR #28) ──
+
+/// A backslash inside double-quoted `${...}` must never duplicate the next
+/// character; before `$ ` " \ }` it escapes, otherwise it stays literal.
+#[test]
+fn backslash_in_double_quoted_braced_parameter() {
+    let cases = [
+        (r#"printf '[%s]' "${OXSH_UNSET_X:-a\qb}""#, r"[a\qb]"),
+        (
+            r#"printf '[%s]' "${OXSH_UNSET_X:-C:\path\to}""#,
+            r"[C:\path\to]",
+        ),
+        (r#"printf '[%s]' "${OXSH_UNSET_X:-\d+}""#, r"[\d+]"),
+        (r#"printf '[%s]' "${OXSH_UNSET_X:-a\$b}""#, "[a$b]"),
+        (r#"printf '[%s]' "${OXSH_UNSET_X:-a\"b}""#, r#"[a"b]"#),
+        (r#"printf '[%s]' "${OXSH_UNSET_X:-a\\b}""#, r"[a\b]"),
+        (r#"printf '[%s]' "${OXSH_UNSET_X:-x\}}""#, "[x}]"),
+        // Unquoted context: the backslash escapes any character.
+        (r#"printf '[%s]' ${OXSH_UNSET_X:-a\qb}"#, "[aqb]"),
+    ];
+    for (script, expected) in cases {
+        oxsh()
+            .args(["-c", script])
+            .env_remove("OXSH_UNSET_X")
+            .assert()
+            .success()
+            .stdout(predicate::eq(expected));
+    }
+}
