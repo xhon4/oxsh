@@ -5,9 +5,10 @@
 .vscode/
 .idea/
 
-# Local docs — only README is tracked
+# Local docs — only README and design docs are tracked
 *.md
 !README.md
+!docs/design/*.md
 
 # Claude Code local files
 .claude/

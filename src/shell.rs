@@ -1,3 +1,6 @@
+use crate::expand::{self, ExpandCtx, ExpandError, Field, Interrupted, RedirectTarget};
+use crate::syntax::parse::{self as sparse, Arg, ChainOp, Item, RedirKind, Stage, StageItem};
+use crate::syntax::{self, OpKind, Token};
 use crate::{builtins, config::Config, context, executor, parser, prompt::OxshPrompt, scripting, structured};
 use reedline::{Reedline, Signal};
 use std::collections::HashMap;
@@ -41,43 +44,242 @@ fn suggest_correction(cmd: &str, known_commands: &[String]) -> Option<String> {
     best.map(|(name, _)| name.to_string())
 }
 
-/// Expand subshells, tokenize, expand variables and aliases, braces, and globs.
-/// Extracted from the two identical expansion pipelines in `handle_input` and
-/// `execute_line_inner` (M5). Returns `(tokens, quoted_flags)`; empty tokens
-/// means nothing to execute.
-fn expand_and_resolve(
-    segment: &str,
-    shell_vars: &scripting::ShellVars,
-    aliases: &HashMap<String, String>,
+/// The shell side of word expansion (see `expand`).
+struct ShellCtx<'a> {
+    vars: &'a scripting::ShellVars,
     glob: bool,
-) -> (Vec<String>, Vec<bool>) {
-    let expanded = parser::expand_subshells(segment);
-    let (mut tokens, mut quoted_flags) = parser::tokenize_with_quote_flags(&expanded);
-    if tokens.is_empty() {
-        return (tokens, quoted_flags);
-    }
-    scripting::expand_shell_vars(&mut tokens, shell_vars);
-    parser::expand_vars(&mut tokens);
-    let before = tokens.len();
-    parser::resolve_alias(&mut tokens, aliases);
-    let after = tokens.len();
-    if after != before {
-        let alias_count = (after + 1).saturating_sub(before);
-        let mut new_flags = vec![false; alias_count];
-        if quoted_flags.len() > 1 {
-            new_flags.extend_from_slice(&quoted_flags[1..before.min(quoted_flags.len())]);
+}
+
+impl ExpandCtx for ShellCtx<'_> {
+    fn var(&self, name: &str, braced: bool) -> Option<String> {
+        if braced {
+            // `${name}` looks the name up as written, as main did.
+            return self.vars.resolve(name);
         }
-        new_flags.resize(after, false);
-        quoted_flags = new_flags;
-    } else {
-        quoted_flags.resize(after, false);
+        match name {
+            "?" => Some(self.vars.resolve("?").unwrap_or_else(|| "0".into())),
+            "$" => Some(std::process::id().to_string()),
+            "!" => {
+                let pid = executor::LAST_BG_PID.load(std::sync::atomic::Ordering::Relaxed);
+                Some(if pid > 0 {
+                    pid.to_string()
+                } else {
+                    String::new()
+                })
+            }
+            "#" => Some(self.vars.resolve("#").unwrap_or_else(|| "0".into())),
+            "@" | "*" => self.vars.resolve("@"),
+            "0" => Some(self.vars.resolve("0").unwrap_or_else(|| "oxsh".into())),
+            _ => self.vars.resolve(name),
+        }
     }
-    parser::expand_braces(&mut tokens);
-    quoted_flags.resize(tokens.len(), false);
-    if glob {
-        parser::expand_globs_respecting_quotes(&mut tokens, &quoted_flags);
+
+    fn run_cmdsub(&mut self, src: &str) -> Result<String, Interrupted> {
+        run_cmdsub(src)
     }
-    (tokens, quoted_flags)
+
+    fn home(&self) -> Option<String> {
+        let h = shellexpand::tilde("~").to_string();
+        if h == "~" { None } else { Some(h) }
+    }
+
+    fn glob_enabled(&self) -> bool {
+        self.glob
+    }
+}
+
+/// Run a command substitution with `$SHELL -c` (fallback `sh`), as main did,
+/// and return its stdout without trailing newlines. A Ctrl-C before or
+/// during the child is reported as `Interrupted` (I4, D12).
+fn run_cmdsub(src: &str) -> Result<String, Interrupted> {
+    if executor::was_interrupted() {
+        return Err(Interrupted);
+    }
+    let cmd = src.trim();
+    if cmd.is_empty() {
+        return Ok(String::new());
+    }
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
+    let out = std::process::Command::new(&shell)
+        .arg("-c")
+        .arg(cmd)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .output();
+    if executor::was_interrupted() {
+        return Err(Interrupted);
+    }
+    match out {
+        Ok(o) => Ok(String::from_utf8_lossy(&o.stdout)
+            .trim_end_matches('\n')
+            .to_string()),
+        Err(e) => {
+            eprintln!("oxsh: $({cmd}): {e}");
+            Ok(String::new())
+        }
+    }
+}
+
+/// What to do after a chain segment.
+enum Flow {
+    Next,
+    /// `exit`: `last_exit_code` holds the encoded exit signal.
+    Exit,
+    /// Ctrl-C during expansion: abandon the rest of the line with `$?=130`.
+    Abort,
+}
+
+/// Expand one argument position. D1(b) cut words and unquoted alias-body
+/// words that expand to a single empty field produce no field (main parity,
+/// see the empty-argument table in docs/design/expansion.md).
+fn expand_arg(a: &Arg, ctx: &mut dyn ExpandCtx) -> Result<Vec<Field>, ExpandError> {
+    match a {
+        Arg::OpText(k) => Ok(vec![Field::op_text(*k)]),
+        Arg::Word { word, from_alias } => {
+            let f = expand::expand_word(word, ctx)?;
+            let single_empty = f.len() == 1 && f.first().is_some_and(|x| x.as_str().is_empty());
+            if single_empty && (word.is_cut() || (*from_alias && !word.has_quoted())) {
+                return Ok(Vec::new());
+            }
+            Ok(f)
+        }
+    }
+}
+
+/// Expand a stage into an executor command, in source order.
+fn build_command(st: &Stage, ctx: &mut dyn ExpandCtx) -> Result<parser::Command, ExpandError> {
+    let mut cmd = parser::Command {
+        args: Vec::new(),
+        stdin_redirect: None,
+        stdout_redirect: None,
+        stderr_redirect: None,
+        merge_stderr: false,
+        background: st.background,
+    };
+    for item in &st.items {
+        match item {
+            StageItem::Arg(a) => cmd
+                .args
+                .extend(expand_arg(a, ctx)?.into_iter().map(Field::into_string)),
+            StageItem::MergeStderr => cmd.merge_stderr = true,
+            StageItem::Redirect { kind, target } => {
+                let t = RedirectTarget::from_fields(expand_arg(target, ctx)?)?.into_string();
+                match kind {
+                    RedirKind::In => cmd.stdin_redirect = Some(t),
+                    RedirKind::Out => cmd.stdout_redirect = Some(parser::Redirect::Truncate(t)),
+                    RedirKind::Append => cmd.stdout_redirect = Some(parser::Redirect::Append(t)),
+                    RedirKind::Err => cmd.stderr_redirect = Some(parser::Redirect::Truncate(t)),
+                    RedirKind::ErrAppend => cmd.stderr_redirect = Some(parser::Redirect::Append(t)),
+                }
+            }
+        }
+    }
+    Ok(cmd)
+}
+
+/// Commands for `on_startup` lines and the `clear` alias (D-START): lexed by
+/// the PR-A lexer, words used as literal source text, no expansion, no
+/// aliases, and `;`/`&&`/`||` kept as literal words, as on main.
+pub fn literal_commands(line: &str) -> Result<Vec<parser::Command>, syntax::SyntaxError> {
+    let items = syntax::lex(line)?
+        .into_iter()
+        .map(|tok| Item {
+            tok,
+            from_alias: false,
+        })
+        .collect();
+    let lit = |a: &Arg| match a {
+        Arg::OpText(k) => k.spelling().to_string(),
+        Arg::Word { word, .. } => word.source_text(),
+    };
+    Ok(sparse::parse_pipeline(items)
+        .iter()
+        .map(|st| {
+            let mut cmd = parser::Command {
+                args: Vec::new(),
+                stdin_redirect: None,
+                stdout_redirect: None,
+                stderr_redirect: None,
+                merge_stderr: false,
+                background: st.background,
+            };
+            for item in &st.items {
+                match item {
+                    StageItem::Arg(a) => cmd.args.push(lit(a)),
+                    StageItem::MergeStderr => cmd.merge_stderr = true,
+                    StageItem::Redirect { kind, target } => {
+                        let t = lit(target);
+                        match kind {
+                            RedirKind::In => cmd.stdin_redirect = Some(t),
+                            RedirKind::Out => {
+                                cmd.stdout_redirect = Some(parser::Redirect::Truncate(t))
+                            }
+                            RedirKind::Append => {
+                                cmd.stdout_redirect = Some(parser::Redirect::Append(t))
+                            }
+                            RedirKind::Err => {
+                                cmd.stderr_redirect = Some(parser::Redirect::Truncate(t))
+                            }
+                            RedirKind::ErrAppend => {
+                                cmd.stderr_redirect = Some(parser::Redirect::Append(t))
+                            }
+                        }
+                    }
+                }
+            }
+            cmd
+        })
+        .collect())
+}
+
+/// Why alias resolution failed: the message and the exit code.
+type AliasError = (String, i32);
+
+/// Replace an alias command word by its body's tokens (D10). The command
+/// word must be literal text; the body is lexed now and expanded later, at
+/// use. Self-reference expands once; mutual recursion stops at depth 16.
+fn resolve_alias_items(
+    mut items: Vec<Item>,
+    aliases: &HashMap<String, String>,
+) -> Result<Vec<Item>, AliasError> {
+    for _ in 0..=16 {
+        let Some(Item {
+            tok: Token::Word(w),
+            ..
+        }) = items.first()
+        else {
+            break;
+        };
+        let Some(name) = w.literal_text() else { break };
+        let Some(body) = aliases.get(&name) else {
+            break;
+        };
+        let body_toks =
+            syntax::lex(body).map_err(|e| (format!("oxsh: alias {name}: syntax error: {e}"), 2))?;
+        if body_toks
+            .iter()
+            .any(|t| t.op_kind().is_some_and(OpKind::is_chain))
+        {
+            return Err((
+                format!("oxsh: alias {name}: command lists in aliases are not supported yet"),
+                1,
+            ));
+        }
+        let self_ref = matches!(body_toks.first(), Some(Token::Word(b)) if b.literal_text().as_deref() == Some(name.as_str()));
+        let mut new: Vec<Item> = body_toks
+            .into_iter()
+            .map(|tok| Item {
+                tok,
+                from_alias: true,
+            })
+            .collect();
+        new.extend(items.into_iter().skip(1));
+        items = new;
+        if self_ref {
+            break;
+        }
+    }
+    Ok(items)
 }
 
 /// Returns true if `input` contains `!!` or `!$` outside of single or double quotes.
@@ -325,269 +527,339 @@ impl Shell {
             )
             .ok();
             if let Some(alias_cmd) = self.config.aliases.get("clear").cloned() {
-                let pipeline = parser::parse_pipeline(&alias_cmd);
-                self.last_exit_code = executor::execute_pipeline(pipeline);
+                match literal_commands(&alias_cmd) {
+                    Ok(pipeline) => self.last_exit_code = executor::execute_pipeline(pipeline),
+                    Err(e) => {
+                        eprintln!("oxsh: clear alias: syntax error: {e}");
+                        self.last_exit_code = 2;
+                    }
+                }
             }
             self.cmd_duration_ms = 0;
             return false;
         }
 
         let start = Instant::now();
-        // Control-flow statements use ';' as syntax (`; do`/`; then`/`; done`),
-        // which must not be treated as chain separators. Hand the whole statement
-        // to the control-flow parsers instead of splitting it on operators.
-        let chain_segments = if is_control_flow_start(input) {
-            vec![(input, ChainOp::None)]
-        } else {
-            split_chain_ops(input)
-        };
+        let exit = self.run_line(input);
+        if exit {
+            let _ = self.line_editor.sync_history();
+            return true;
+        }
+        self.cmd_duration_ms = start.elapsed().as_millis();
+        false
+    }
 
-        for (segment, op) in chain_segments {
+    /// Lex one line, split it into chain segments on operator tokens and run
+    /// them. Returns true when the shell should exit (`last_exit_code` then
+    /// holds the encoded exit signal).
+    fn run_line(&mut self, input: &str) -> bool {
+        // Control-flow statements use ';' as syntax (`; do`/`; then`/`; done`);
+        // a line that starts with one keeps main's string parsers (debt).
+        if is_control_flow_start(input) {
+            self.shell_vars.set("?", &self.last_exit_code.to_string());
+            if let Some(exit) = self.run_control_flow(input) {
+                return exit;
+            }
+            // Main ran an unparsable statement as one command and still
+            // expanded it; PR-A rejects it and runs nothing (I3, debt B12).
+            eprintln!(
+                "oxsh: syntax error: unsupported {} form (the statement must be the whole line)",
+                control_keyword(input)
+            );
+            self.last_exit_code = 2;
+            return false;
+        }
+        let tokens = match syntax::lex(input) {
+            Ok(t) => t,
+            Err(e) => {
+                // D7: the whole line is rejected; nothing runs (I2/I3).
+                eprintln!("oxsh: syntax error: {e}");
+                self.last_exit_code = 2;
+                return false;
+            }
+        };
+        let chars: Vec<char> = input.chars().collect();
+        for (seg, op) in sparse::split_chain(tokens) {
             // Ctrl-C abandons the rest of the command line, like other shells.
             if executor::was_interrupted() {
                 self.last_exit_code = 130;
                 break;
             }
-            let segment = segment.trim();
-            if segment.is_empty() {
+            if seg.is_empty() {
                 continue;
             }
-
             self.shell_vars.set("?", &self.last_exit_code.to_string());
 
-            // For loop
-            if let Some(for_loop) = scripting::parse_for_loop(segment) {
-                for item in &for_loop.items {
-                    self.shell_vars.set(&for_loop.var, item);
-                    self.last_exit_code = self.execute_line_inner(&for_loop.body);
-                    if builtins::is_exit_signal(self.last_exit_code) {
-                        let _ = self.line_editor.sync_history();
+            // A segment that starts with a control-flow keyword goes to main's
+            // control-flow parsers with its source text, as on main.
+            if let Some(Token::Word(w)) = seg.first()
+                && matches!(w.literal_text().as_deref(), Some("for" | "while" | "if"))
+            {
+                let a = seg.first().map_or(0, |t| t.span().0);
+                let b = seg.last().map_or(0, |t| t.span().1);
+                let raw: String = chars
+                    .get(a..b)
+                    .map(|c| c.iter().collect())
+                    .unwrap_or_default();
+                if let Some(exit) = self.run_control_flow(&raw) {
+                    if exit {
                         return true;
                     }
-                    if executor::was_interrupted() {
-                        self.last_exit_code = 130;
-                        break;
-                    }
-                }
-                if should_skip(op, self.last_exit_code) {
-                    break;
-                }
-                continue;
-            }
-
-            // While loop
-            if let Some(while_loop) = scripting::parse_while_loop(segment) {
-                // An empty condition would loop until the iteration cap; reject it.
-                if while_loop.condition.trim().is_empty() {
-                    eprintln!("oxsh: while: empty condition");
-                    self.last_exit_code = 2;
                     if should_skip(op, self.last_exit_code) {
                         break;
                     }
                     continue;
                 }
-                let max_iter = self.max_iterations;
-                let mut iterations = 0usize;
-                loop {
-                    let cond_code = self.execute_line_inner(&while_loop.condition);
-                    if executor::was_interrupted() {
-                        self.last_exit_code = 130;
-                        break;
-                    }
-                    if cond_code != 0 {
-                        break;
-                    }
-                    self.last_exit_code = self.execute_line_inner(&while_loop.body);
-                    if builtins::is_exit_signal(self.last_exit_code) {
-                        let _ = self.line_editor.sync_history();
-                        return true;
-                    }
-                    if executor::was_interrupted() {
-                        self.last_exit_code = 130;
-                        break;
-                    }
-                    iterations += 1;
-                    if iterations >= max_iter {
-                        eprintln!(
-                            "oxsh: while loop exceeded {max_iter} iterations (set OXSH_MAX_ITERATIONS to raise)"
-                        );
-                        self.last_exit_code = 1;
-                        break;
-                    }
-                }
-                if should_skip(op, self.last_exit_code) {
-                    break;
-                }
-                continue;
+                // Not parsable mid-line: like main, it runs as an ordinary
+                // command (`for: not found`) and the chain continues.
             }
 
-            // If block
-            if let Some(if_block) = scripting::parse_if(segment) {
-                let cond_code = self.execute_line_inner(&if_block.condition);
-                if cond_code == 0 {
-                    self.last_exit_code = self.execute_line_inner(&if_block.then_body);
-                    if builtins::is_exit_signal(self.last_exit_code) {
-                        let _ = self.line_editor.sync_history();
-                        return true;
-                    }
-                } else if let Some(ref else_body) = if_block.else_body {
-                    self.last_exit_code = self.execute_line_inner(else_body);
-                    if builtins::is_exit_signal(self.last_exit_code) {
-                        let _ = self.line_editor.sync_history();
-                        return true;
-                    }
-                }
-                if should_skip(op, self.last_exit_code) {
-                    break;
-                }
-                continue;
-            }
-
-            // Variable assignment: VAR=value or env-prefix VAR=val cmd
-            if let Some((key, val, cmd)) = scripting::parse_env_prefix(segment) {
-                // VAR=val cmd — run `cmd` with KEY=val in its environment only.
-                let mut vt = vec![val.to_string()];
-                scripting::expand_shell_vars(&mut vt, &self.shell_vars);
-                parser::expand_vars(&mut vt);
-                let env_val = scripting::strip_quotes(&vt[0]).to_string();
-                // SAFETY: REPL runs on main thread; PATH scanner was joined before
-                // the loop; stdin-writer threads are joined per-command (M8).
-                let prev_env = std::env::var(key).ok();
-                unsafe { std::env::set_var(key, &env_val) };
-                self.last_exit_code = self.execute_line_inner(cmd);
-                match prev_env {
-                    Some(v) => unsafe { std::env::set_var(key, v) },
-                    None => unsafe { std::env::remove_var(key) },
-                }
-                if builtins::is_exit_signal(self.last_exit_code) {
-                    let _ = self.line_editor.sync_history();
-                    return true;
-                }
-                if should_skip(op, self.last_exit_code) {
-                    break;
-                }
-                continue;
-            } else if let Some((key, raw_val)) = scripting::is_var_assignment(segment) {
-                // Pure assignment: VAR=value — set in shell variable table.
-                let expanded_val = parser::expand_subshells(raw_val);
-                let mut val_tokens = parser::tokenize(&expanded_val);
-                scripting::expand_shell_vars(&mut val_tokens, &self.shell_vars);
-                parser::expand_vars(&mut val_tokens);
-                let final_val = val_tokens.join(" ");
-                let final_val = scripting::strip_quotes(&final_val).to_string();
-                self.shell_vars.set(key, &final_val);
-                self.last_exit_code = 0;
-                // ^C during `$(...)` in the value abandons the rest of the line.
-                if executor::was_interrupted() {
+            let items = seg
+                .into_iter()
+                .map(|tok| Item {
+                    tok,
+                    from_alias: false,
+                })
+                .collect();
+            match self.run_segment(items) {
+                Flow::Exit => return true,
+                Flow::Abort => {
                     self.last_exit_code = 130;
                     break;
                 }
-                if should_skip(op, self.last_exit_code) {
-                    break;
-                }
-                continue;
+                Flow::Next => {}
             }
-
-            let (tokens, quoted_flags) = expand_and_resolve(
-                segment,
-                &self.shell_vars,
-                &self.aliases,
-                self.config.shell.glob,
-            );
-            if tokens.is_empty() {
-                continue;
-            }
-            // ^C while a `$(...)` was being expanded: never run the command with
-            // a truncated expansion (e.g. `rm -rf "$(slow)"/build`).
-            if executor::was_interrupted() {
-                self.last_exit_code = 130;
-                break;
-            }
-
-            // Auto-cd
-            if self.config.shell.auto_cd
-                && tokens.len() == 1
-                && parser::looks_like_directory(&tokens[0])
-            {
-                let cd_args = vec!["cd".into(), tokens[0].clone()];
-                self.last_exit_code = builtins::try_builtin(&cd_args, &self.shell_vars).unwrap_or(0);
-                if should_skip(op, self.last_exit_code) {
-                    break;
-                }
-                continue;
-            }
-
-            // Shell-state builtins (need mutable access to shell state)
-            if let Some(code) = self.handle_stateful_builtin(&tokens) {
-                self.last_exit_code = code;
-                if should_skip(op, self.last_exit_code) {
-                    break;
-                }
-                continue;
-            }
-
-            // Regular builtins
-            if let Some(code) = builtins::try_builtin(&tokens, &self.shell_vars) {
-                if builtins::is_exit_signal(code) {
-                    self.last_exit_code = code; // preserve encoded exit code for run_command
-                    let _ = self.line_editor.sync_history();
-                    return true;
-                }
-                self.last_exit_code = code;
-                if should_skip(op, self.last_exit_code) {
-                    break;
-                }
-                continue;
-            }
-
-            // Save cmd name before execute_tokens takes ownership of tokens (P8).
-            let cmd_name = tokens.first().cloned().unwrap_or_default();
-            // External commands — build pipeline directly from tokens to avoid
-            // the join→re-parse round-trip that breaks arguments with spaces.
-            self.last_exit_code = self.execute_tokens(tokens, quoted_flags, segment);
-
-            // Typo correction: suggest if command not found
-            if self.last_exit_code == 127
-                && let Some(suggestion) = suggest_correction(&cmd_name, &self.known_commands)
-            {
-                let safe = context::sanitize_label(&suggestion);
-                eprintln!("\x1b[33moxsh: did you mean \x1b[1m{safe}\x1b[22m?\x1b[0m");
-            }
-
             if should_skip(op, self.last_exit_code) {
                 break;
             }
         }
-
-        self.cmd_duration_ms = start.elapsed().as_millis();
         false
     }
 
-    /// Execute a pre-expanded, pre-tokenized set of tokens as a pipeline.
-    ///
-    /// This is the fix for the join→re-parse bug: instead of doing
-    ///   `tokens.join(" ")` → `parse_pipeline(string)`
-    /// we split the already-expanded tokens on pipe markers and build
-    /// Commands directly, preserving arguments with spaces.
-    fn execute_tokens(&self, tokens: Vec<String>, quoted_flags: Vec<bool>, _original_segment: &str) -> i32 {
-        // Split tokens into pipe stages on "|" token boundaries.
-        // Redirect tokens (>, >>, <, 2>, 2>>, 2>&1) are handled per-stage.
-        let stages = split_tokens_on_pipes(tokens, &quoted_flags);
-
-        // If there's only one stage and no pipe was present, we can use the fast path.
-        // For multi-stage pipelines we build Commands directly from token groups.
-        let commands = parser::parse_pipeline_from_tokens(stages);
-
-        if commands.is_empty() {
-            // Fallback: shouldn't happen, but if tokens were empty just no-op
-            return 0;
+    /// Main's for/while/if handling. Returns `None` if `segment` is not a
+    /// control-flow statement, `Some(true)` when the shell should exit.
+    fn run_control_flow(&mut self, segment: &str) -> Option<bool> {
+        if let Some(for_loop) = scripting::parse_for_loop(segment) {
+            for item in &for_loop.items {
+                self.shell_vars.set(&for_loop.var, item);
+                self.last_exit_code = self.execute_line_inner(&for_loop.body);
+                if builtins::is_exit_signal(self.last_exit_code) {
+                    return Some(true);
+                }
+                if executor::was_interrupted() {
+                    self.last_exit_code = 130;
+                    break;
+                }
+            }
+            return Some(false);
         }
 
-        // If the pipeline has a single command and it has no structured component,
-        // but the original segment had subshell expansions in it that produced
-        // a pipeline string (e.g. CMD=$(echo "a | b")), fall back to string parse.
-        // In practice this is rare; the token path handles 99% of cases correctly.
-        executor::execute_pipeline(commands)
+        if let Some(while_loop) = scripting::parse_while_loop(segment) {
+            // An empty condition would loop until the iteration cap; reject it.
+            if while_loop.condition.trim().is_empty() {
+                eprintln!("oxsh: while: empty condition");
+                self.last_exit_code = 2;
+                return Some(false);
+            }
+            let max_iter = self.max_iterations;
+            let mut iterations = 0usize;
+            loop {
+                let cond_code = self.execute_line_inner(&while_loop.condition);
+                if builtins::is_exit_signal(cond_code) {
+                    return Some(true);
+                }
+                if executor::was_interrupted() {
+                    self.last_exit_code = 130;
+                    break;
+                }
+                if cond_code != 0 {
+                    break;
+                }
+                self.last_exit_code = self.execute_line_inner(&while_loop.body);
+                if builtins::is_exit_signal(self.last_exit_code) {
+                    return Some(true);
+                }
+                if executor::was_interrupted() {
+                    self.last_exit_code = 130;
+                    break;
+                }
+                iterations += 1;
+                if iterations >= max_iter {
+                    eprintln!(
+                        "oxsh: while loop exceeded {max_iter} iterations (set OXSH_MAX_ITERATIONS to raise)"
+                    );
+                    self.last_exit_code = 1;
+                    break;
+                }
+            }
+            return Some(false);
+        }
+
+        if let Some(if_block) = scripting::parse_if(segment) {
+            let cond_code = self.execute_line_inner(&if_block.condition);
+            if builtins::is_exit_signal(cond_code) {
+                return Some(true);
+            }
+            if executor::was_interrupted() {
+                self.last_exit_code = 130;
+                return Some(false);
+            }
+            if cond_code == 0 {
+                self.last_exit_code = self.execute_line_inner(&if_block.then_body);
+            } else if let Some(ref else_body) = if_block.else_body {
+                self.last_exit_code = self.execute_line_inner(else_body);
+            }
+            return Some(builtins::is_exit_signal(self.last_exit_code));
+        }
+        None
+    }
+
+    /// Run one chain segment: assignments and env-prefix (D11), aliases
+    /// (D10), expansion, then builtin or pipeline dispatch.
+    fn run_segment(&mut self, items: Vec<Item>) -> Flow {
+        if let Some(Item {
+            tok: Token::Word(w),
+            ..
+        }) = items.first()
+            && let Some((name, value)) = w.assignment()
+        {
+            let mut ctx = ShellCtx {
+                vars: &self.shell_vars,
+                glob: self.config.shell.glob,
+            };
+            let val = match expand::expand_assignment_value(&value, &mut ctx) {
+                Ok(v) => v,
+                Err(e) => return self.expand_failed(e),
+            };
+            if items.len() == 1 {
+                // Pure assignment. An interrupted value never gets here (D12).
+                self.shell_vars.set(&name, &val);
+                self.last_exit_code = 0;
+                return Flow::Next;
+            }
+            // `NAME=value cmd`: run the rest with NAME in its environment only.
+            // SAFETY: the REPL runs on the main thread; the PATH scanner thread
+            // was joined before the loop, and stdin-writer threads are joined
+            // per command (M8), so nothing reads the environment concurrently.
+            let prev = std::env::var(&name).ok();
+            unsafe { std::env::set_var(&name, &val) };
+            let flow = self.run_segment(items.into_iter().skip(1).collect());
+            match prev {
+                Some(v) => unsafe { std::env::set_var(&name, v) },
+                None => unsafe { std::env::remove_var(&name) },
+            }
+            return flow;
+        }
+
+        let items = match resolve_alias_items(items, &self.aliases) {
+            Ok(i) => i,
+            Err((msg, code)) => {
+                eprintln!("{msg}");
+                self.last_exit_code = code;
+                return Flow::Next;
+            }
+        };
+        // Any pipe or redirect operator token, even one left as a literal
+        // argument because it has no target (D5 is lexical).
+        let has_ops = items.iter().any(|i| {
+            i.tok
+                .op_kind()
+                .is_some_and(|k| !k.is_chain() && k != OpKind::Background)
+        });
+        let stages = sparse::parse_pipeline(items);
+
+        let mut cmds: Vec<parser::Command> = Vec::with_capacity(stages.len());
+        {
+            let mut ctx = ShellCtx {
+                vars: &self.shell_vars,
+                glob: self.config.shell.glob,
+            };
+            for st in &stages {
+                match build_command(st, &mut ctx) {
+                    Ok(c) => cmds.push(c),
+                    Err(e) => return self.expand_failed(e),
+                }
+            }
+        }
+        if !has_ops && cmds.iter().all(|c| c.args.is_empty()) {
+            return Flow::Next;
+        }
+
+        let first = cmds
+            .first()
+            .and_then(|c| c.args.first())
+            .cloned()
+            .unwrap_or_default();
+        // D5: builtins cannot honour redirects or pipes yet (#11).
+        if has_ops && builtins::BUILTIN_NAMES.contains(&first.as_str()) {
+            eprintln!(
+                "oxsh: {first}: redirections and pipes are not supported for builtins yet (#11)"
+            );
+            self.last_exit_code = 1;
+            return Flow::Next;
+        }
+
+        if !has_ops && cmds.len() == 1 {
+            let Some(cmd) = cmds.first() else {
+                return Flow::Next;
+            };
+            // Auto-cd
+            if self.config.shell.auto_cd
+                && !cmd.background
+                && cmd.args.len() == 1
+                && parser::looks_like_directory(&first)
+            {
+                let cd_args = vec!["cd".into(), first.clone()];
+                self.last_exit_code = builtins::try_builtin(&cd_args, &self.shell_vars).unwrap_or(0);
+                return Flow::Next;
+            }
+            // Builtins see a trailing `&` as an argument, as on main.
+            let mut tokens = cmd.args.clone();
+            if cmd.background {
+                tokens.push("&".into());
+            }
+            if !tokens.is_empty() && builtins::BUILTIN_NAMES.contains(&first.as_str()) {
+                if let Some(code) = self.handle_stateful_builtin(&tokens) {
+                    self.last_exit_code = code;
+                    return Flow::Next;
+                }
+                if let Some(code) = builtins::try_builtin(&tokens, &self.shell_vars) {
+                    self.last_exit_code = code;
+                    if builtins::is_exit_signal(code) {
+                        return Flow::Exit;
+                    }
+                    return Flow::Next;
+                }
+            }
+        }
+
+        self.last_exit_code = executor::execute_pipeline(cmds);
+
+        // Typo correction: suggest if command not found
+        if self.last_exit_code == 127
+            && let Some(suggestion) = suggest_correction(&first, &self.known_commands)
+        {
+            let safe = context::sanitize_label(&suggestion);
+            eprintln!("\x1b[33moxsh: did you mean \x1b[1m{safe}\x1b[22m?\x1b[0m");
+        }
+        Flow::Next
+    }
+
+    /// Report an expansion failure for the current segment.
+    fn expand_failed(&mut self, e: ExpandError) -> Flow {
+        match e {
+            ExpandError::Interrupted => Flow::Abort,
+            ExpandError::Ambiguous => {
+                eprintln!("oxsh: ambiguous redirect");
+                self.last_exit_code = 1;
+                Flow::Next
+            }
+            ExpandError::ArithUnsupported => {
+                eprintln!("oxsh: arithmetic expansion not supported yet");
+                self.last_exit_code = 1;
+                Flow::Next
+            }
+        }
     }
 
     /// Handle builtins that need mutable access to shell state.
@@ -739,56 +1011,17 @@ impl Shell {
         self.shell_vars.set(&n.to_string(), value);
     }
 
-    /// Execute a single line as a command (used by for/while/if bodies and recursion).
-    /// This path goes through full expansion + token-based pipeline building.
+    /// Execute a line from a for/while/if body or condition through the
+    /// same lexer, chain and expansion path as a top-level line (decision 8).
+    /// Like main, the caller decides what to do with the returned code;
+    /// `last_exit_code` is left as it was (only `$?` inside the line sees
+    /// the inner codes).
     fn execute_line_inner(&mut self, input: &str) -> i32 {
-        // Variable assignment: env-prefix first, then pure assignment
-        if let Some((key, val, cmd)) = scripting::parse_env_prefix(input) {
-            let mut vt = vec![val.to_string()];
-            scripting::expand_shell_vars(&mut vt, &self.shell_vars);
-            parser::expand_vars(&mut vt);
-            let env_val = scripting::strip_quotes(&vt[0]).to_string();
-            // SAFETY: see handle_input — REPL main thread, no concurrent env readers.
-            let prev_env = std::env::var(key).ok();
-            unsafe { std::env::set_var(key, &env_val) };
-            let code = self.execute_line_inner(cmd);
-            match prev_env {
-                Some(v) => unsafe { std::env::set_var(key, v) },
-                None => unsafe { std::env::remove_var(key) },
-            }
-            return code;
-        } else if let Some((key, raw_val)) = scripting::is_var_assignment(input) {
-            let expanded_val = parser::expand_subshells(raw_val);
-            let mut val_tokens = parser::tokenize(&expanded_val);
-            scripting::expand_shell_vars(&mut val_tokens, &self.shell_vars);
-            parser::expand_vars(&mut val_tokens);
-            let final_val = val_tokens.join(" ");
-            let final_val = scripting::strip_quotes(&final_val).to_string();
-            self.shell_vars.set(key, &final_val);
-            return if executor::was_interrupted() { 130 } else { 0 };
-        }
-
-        let (tokens, quoted_flags) = expand_and_resolve(
-            input,
-            &self.shell_vars,
-            &self.aliases,
-            self.config.shell.glob,
-        );
-        if tokens.is_empty() {
-            return 0;
-        }
-        if executor::was_interrupted() {
-            return 130;
-        }
-
-        if let Some(code) = builtins::try_builtin(&tokens, &self.shell_vars) {
-            return code; // propagates exit signal (with embedded exit code) to callers
-        }
-
-        // Use token-based pipeline building (no join→re-parse)
-        let stages = split_tokens_on_pipes(tokens, &quoted_flags);
-        let commands = parser::parse_pipeline_from_tokens(stages);
-        executor::execute_pipeline(commands)
+        let saved = self.last_exit_code;
+        self.run_line(input);
+        let code = self.last_exit_code;
+        self.last_exit_code = saved;
+        code
     }
 }
 
@@ -819,31 +1052,9 @@ fn explain_command(cmd: &str) {
     }
 }
 
-/// Split a token list into pipeline stages on bare `|` tokens.
-/// `quoted_flags[i]` being true means token i was quoted — such a `|` is
-/// treated as a literal character, not a pipe separator.
-fn split_tokens_on_pipes(tokens: Vec<String>, quoted_flags: &[bool]) -> Vec<Vec<String>> {
-    let mut stages: Vec<Vec<String>> = Vec::new();
-    let mut current: Vec<String> = Vec::new();
-
-    for (i, token) in tokens.into_iter().enumerate() {
-        let is_quoted = quoted_flags.get(i).copied().unwrap_or(false);
-        if token == "|" && !is_quoted {
-            stages.push(std::mem::take(&mut current));
-        } else {
-            current.push(token);
-        }
-    }
-    stages.push(current);
-    stages
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum ChainOp {
-    And,
-    Or,
-    Semicolon,
-    None,
+/// The control-flow keyword a line starts with, for error messages.
+fn control_keyword(input: &str) -> &str {
+    input.split_whitespace().next().unwrap_or("")
 }
 
 fn should_skip(op: ChainOp, exit_code: i32) -> bool {
@@ -860,60 +1071,6 @@ fn should_skip(op: ChainOp, exit_code: i32) -> bool {
 fn is_control_flow_start(input: &str) -> bool {
     let t = input.trim_start();
     t.starts_with("for ") || t.starts_with("while ") || t.starts_with("if ")
-}
-
-/// Split input on unquoted `&&`, `||`, `;` chain operators.
-/// Properly handles `\` escape sequences so `echo a\;b` is not split on `;`.
-fn split_chain_ops(input: &str) -> Vec<(&str, ChainOp)> {
-    let mut segments: Vec<(&str, ChainOp)> = Vec::new();
-    let mut start = 0;
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut escape = false;
-    let bytes = input.as_bytes();
-    let mut i = 0;
-
-    while i < bytes.len() {
-        if escape {
-            escape = false;
-            i += 1;
-            continue;
-        }
-        match bytes[i] {
-            b'\\' if !in_single => {
-                escape = true;
-                i += 1;
-            }
-            b'\'' if !in_double => {
-                in_single = !in_single;
-                i += 1;
-            }
-            b'"' if !in_single => {
-                in_double = !in_double;
-                i += 1;
-            }
-            b'&' if !in_single && !in_double && i + 1 < bytes.len() && bytes[i + 1] == b'&' => {
-                segments.push((&input[start..i], ChainOp::And));
-                i += 2;
-                start = i;
-            }
-            b'|' if !in_single && !in_double && i + 1 < bytes.len() && bytes[i + 1] == b'|' => {
-                segments.push((&input[start..i], ChainOp::Or));
-                i += 2;
-                start = i;
-            }
-            b';' if !in_single && !in_double => {
-                segments.push((&input[start..i], ChainOp::Semicolon));
-                i += 1;
-                start = i;
-            }
-            _ => {
-                i += 1;
-            }
-        }
-    }
-    segments.push((&input[start..], ChainOp::None));
-    segments
 }
 
 #[cfg(test)]
@@ -949,5 +1106,132 @@ mod tests {
         assert!(is_control_flow_start("if a; then b; fi"));
         assert!(!is_control_flow_start("forge build"));
         assert!(!is_control_flow_start("echo for"));
+    }
+
+    // Ported from scripting.rs (expand_shell_vars) tests: variable expansion
+    // now goes through the lexer and `expand::expand_word` with ShellCtx.
+    fn expand_with(input: &str, vars: &scripting::ShellVars) -> String {
+        let mut ctx = ShellCtx { vars, glob: false };
+        let toks = syntax::lex(input).unwrap();
+        let Some(Token::Word(w)) = toks.first() else {
+            panic!("no word")
+        };
+        expand::expand_word(w, &mut ctx)
+            .unwrap()
+            .into_iter()
+            .map(Field::into_string)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn expands_named_and_braced_vars() {
+        let mut v = scripting::ShellVars::new();
+        v.set("FOO", "bar");
+        assert_eq!(expand_with("$FOO", &v), "bar");
+        assert_eq!(expand_with("${FOO}", &v), "bar");
+        assert_eq!(expand_with("pre$FOO", &v), "prebar");
+    }
+
+    #[test]
+    fn unset_var_expands_to_empty() {
+        let v = scripting::ShellVars::new();
+        assert_eq!(expand_with("$NOPE_OXSH_TEST", &v), "");
+    }
+
+    #[test]
+    fn expands_exit_code_special() {
+        let mut v = scripting::ShellVars::new();
+        v.set("?", "2");
+        assert_eq!(expand_with("$?", &v), "2");
+    }
+
+    #[test]
+    fn lone_dollar_before_non_name_is_literal() {
+        let v = scripting::ShellVars::new();
+        assert_eq!(expand_with("$.", &v), "$.");
+    }
+
+    #[test]
+    #[ignore = "Known limitation (IN3): $# and ${#} must agree; currently $# -> \"0\" but ${#} -> \"\"."]
+    fn braced_and_unbraced_specials_agree() {
+        let v = scripting::ShellVars::new();
+        assert_eq!(expand_with("$#", &v), expand_with("${#}", &v));
+    }
+
+    #[test]
+    fn default_value_parameter_expansion() {
+        let mut v = scripting::ShellVars::new();
+        assert_eq!(expand_with("${NOPE_OXSH_TEST:-fallback}", &v), "fallback");
+        v.set("NOPE_OXSH_TEST", "real");
+        assert_eq!(expand_with("${NOPE_OXSH_TEST:-fallback}", &v), "real");
+        v.set("EMPTY", "");
+        assert_eq!(expand_with("${EMPTY:-fallback}", &v), "fallback");
+    }
+
+    // Ported from parser.rs (resolve_alias) tests.
+    fn aliases(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    fn resolve(line: &str, a: &HashMap<String, String>) -> Vec<String> {
+        let items = syntax::lex(line)
+            .unwrap()
+            .into_iter()
+            .map(|tok| Item {
+                tok,
+                from_alias: false,
+            })
+            .collect();
+        resolve_alias_items(items, a)
+            .unwrap()
+            .into_iter()
+            .map(|i| match i.tok {
+                Token::Word(w) => w.source_text(),
+                Token::Op(o) => o.kind().spelling().to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn resolves_simple_alias_with_args() {
+        assert_eq!(
+            resolve("g status", &aliases(&[("g", "git")])),
+            ["git", "status"]
+        );
+    }
+
+    #[test]
+    fn self_referencing_alias_does_not_hang() {
+        assert_eq!(
+            resolve("ls -a", &aliases(&[("ls", "ls --color")])),
+            ["ls", "--color", "-a"]
+        );
+    }
+
+    #[test]
+    fn mutual_alias_recursion_is_bounded() {
+        assert!(!resolve("x", &aliases(&[("x", "y"), ("y", "x")])).is_empty());
+    }
+
+    #[test]
+    fn alias_body_with_command_list_is_rejected() {
+        let items = syntax::lex("g")
+            .unwrap()
+            .into_iter()
+            .map(|tok| Item {
+                tok,
+                from_alias: false,
+            })
+            .collect();
+        assert!(resolve_alias_items(items, &aliases(&[("g", "a; b")])).is_err());
+    }
+
+    #[test]
+    fn expansion_words_are_not_alias_names() {
+        assert_eq!(resolve("$X y", &aliases(&[("$X", "boom")])), ["$X", "y"]);
     }
 }
