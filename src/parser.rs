@@ -76,7 +76,12 @@ pub fn tokenize_words(input: &str) -> Vec<Word> {
     let mut escape = false;
     let mut was_quoted = false;
     let mut has_unquoted_char = false;
+    // `operator_eligible`: the pending word may still turn out to be an
+    // operator (nothing quoted, escaped or substituted *into* it).
+    // `literal_word`: the pending word is plain literal text, the only kind
+    // that may name an alias or be glued to an operator (`cmd>file`).
     let mut operator_eligible = true;
+    let mut literal_word = true;
     let mut i = 0;
 
     while i < chars.len() {
@@ -85,6 +90,7 @@ pub fn tokenize_words(input: &str) -> Vec<Word> {
             push_fragment(&mut current, ch, ch != '$');
             escape = false;
             operator_eligible = false;
+            literal_word = false;
             has_unquoted_char = true;
             i += 1;
             continue;
@@ -93,6 +99,7 @@ pub fn tokenize_words(input: &str) -> Vec<Word> {
             if let Some((text, end)) = lex_braced_parameter(&chars, i, in_double) {
                 push_text_fragment(&mut current, &text, true);
                 operator_eligible = false;
+                literal_word = false;
                 if !in_double {
                     has_unquoted_char = true;
                 }
@@ -104,8 +111,9 @@ pub fn tokenize_words(input: &str) -> Vec<Word> {
             if let Some(end) = find_subshell_end(&chars, i + 2) {
                 let command: String = chars[i + 2..end].iter().collect();
                 let output = run_subshell(&command);
-                operator_eligible = false;
+                literal_word = false;
                 if in_double {
+                    operator_eligible = false;
                     push_text_fragment(&mut current, &output, false);
                 } else {
                     has_unquoted_char = true;
@@ -116,6 +124,10 @@ pub fn tokenize_words(input: &str) -> Vec<Word> {
                         &mut was_quoted,
                         &mut has_unquoted_char,
                     );
+                    // If the output left no pending word (empty, or ending in a
+                    // blank), what follows starts a fresh word that may be an
+                    // operator, as if the substitution were not there.
+                    operator_eligible = current.fragments.is_empty() && !was_quoted;
                 }
                 i = end + 1;
                 continue;
@@ -133,8 +145,9 @@ pub fn tokenize_words(input: &str) -> Vec<Word> {
             if end < chars.len() {
                 let command: String = chars[start..end].iter().collect();
                 let output = run_subshell(&command);
-                operator_eligible = false;
+                literal_word = false;
                 if in_double {
+                    operator_eligible = false;
                     push_text_fragment(&mut current, &output, false);
                 } else {
                     has_unquoted_char = true;
@@ -145,6 +158,10 @@ pub fn tokenize_words(input: &str) -> Vec<Word> {
                         &mut was_quoted,
                         &mut has_unquoted_char,
                     );
+                    // If the output left no pending word (empty, or ending in a
+                    // blank), what follows starts a fresh word that may be an
+                    // operator, as if the substitution were not there.
+                    operator_eligible = current.fragments.is_empty() && !was_quoted;
                 }
                 i = end + 1;
                 continue;
@@ -159,11 +176,13 @@ pub fn tokenize_words(input: &str) -> Vec<Word> {
                 in_single = !in_single;
                 was_quoted = true;
                 operator_eligible = false;
+                literal_word = false;
             }
             '"' if !in_single => {
                 in_double = !in_double;
                 was_quoted = true;
                 operator_eligible = false;
+                literal_word = false;
             }
             ' ' | '\t' if !in_single && !in_double => {
                 if !current.fragments.is_empty() || was_quoted {
@@ -172,6 +191,7 @@ pub fn tokenize_words(input: &str) -> Vec<Word> {
                         &mut current,
                         was_quoted && !has_unquoted_char,
                         operator_eligible,
+                        literal_word,
                     );
                     was_quoted = false;
                     has_unquoted_char = false;
@@ -179,10 +199,36 @@ pub fn tokenize_words(input: &str) -> Vec<Word> {
                 // Every unquoted blank starts a new word that may be an operator,
                 // even when no word was pending (e.g. after an empty `$(...)`).
                 operator_eligible = true;
+                literal_word = true;
+            }
+            '<' | '>' | '|' | '&'
+                if !in_single
+                    && !in_double
+                    && !literal_word
+                    && (!current.fragments.is_empty() || was_quoted) =>
+            {
+                // An unquoted operator character ends a word that is not plain
+                // literal text (`$X>`, `${X}|`, `$(cmd)>`, `"a">`), as in bash.
+                // Plain words keep the old behaviour (`cmd>file` is one word).
+                finish_word(
+                    &mut tokens,
+                    &mut current,
+                    was_quoted && !has_unquoted_char,
+                    false,
+                    false,
+                );
+                was_quoted = false;
+                operator_eligible = true;
+                literal_word = true;
+                has_unquoted_char = true;
+                push_fragment(&mut current, ch, true);
             }
             _ => {
                 if !in_single && !in_double {
                     has_unquoted_char = true;
+                    if ch == '$' {
+                        literal_word = false;
+                    }
                 }
                 push_fragment(&mut current, ch, !in_single);
             }
@@ -195,6 +241,7 @@ pub fn tokenize_words(input: &str) -> Vec<Word> {
             &mut current,
             was_quoted && !has_unquoted_char,
             operator_eligible,
+            literal_word,
         );
     }
     tokens
@@ -232,7 +279,7 @@ fn push_split_substitution(
     }
     for field in fields {
         if !current.fragments.is_empty() || *was_quoted {
-            finish_word(tokens, current, false, false);
+            finish_word(tokens, current, false, false, false);
             *was_quoted = false;
         }
         *has_unquoted_char = true;
@@ -263,13 +310,14 @@ fn finish_word(
     word: &mut Word,
     fully_quoted: bool,
     operator_eligible: bool,
+    literal: bool,
 ) {
     let text = word.text();
     tokens.push(Word {
         fragments: std::mem::take(&mut word.fragments),
         operator: operator_eligible && is_shell_operator(&text),
         fully_quoted,
-        plain: operator_eligible,
+        plain: literal,
     });
     word.operator = false;
     word.fully_quoted = false;

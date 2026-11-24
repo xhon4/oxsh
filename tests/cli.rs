@@ -734,3 +734,71 @@ fn backslash_in_double_quoted_braced_parameter() {
             .stdout(predicate::eq(expected));
     }
 }
+
+/// An operator glued to the end of an expansion (`$X>`, `$(...)>`,
+/// `"..."|`) is still an operator, as in bash and (for empty values) main.
+/// Review reproducer: `rm -v $(find . -name '*.bak')> log.txt` deleted
+/// log.txt when find printed nothing.
+#[test]
+fn operator_glued_to_an_expansion_stays_an_operator() {
+    let dir = tempfile::tempdir().expect("temporary directory");
+    let run = |script: &str| {
+        oxsh()
+            .current_dir(dir.path())
+            .env_remove("OXSH_UNSET_X")
+            .args(["-c", script])
+            .timeout(std::time::Duration::from_secs(10))
+            .assert()
+    };
+    let read = |name: &str| std::fs::read_to_string(dir.path().join(name)).unwrap_or_default();
+
+    for script in [
+        "rm -v $(find . -name '*.bak')> log.txt",
+        "rm -v $OXSH_UNSET_X> log.txt",
+        "rm -v ${OXSH_UNSET_X}> log.txt",
+    ] {
+        std::fs::write(dir.path().join("log.txt"), "important").unwrap();
+        run(script);
+        assert!(
+            dir.path().join("log.txt").exists(),
+            "{script} deleted log.txt"
+        );
+    }
+
+    run("printf hi $(true)> out1");
+    assert_eq!(read("out1"), "hi");
+    run("printf hi `true`> out2");
+    assert_eq!(read("out2"), "hi");
+    run("printf hi $OXSH_UNSET_X> out3");
+    assert_eq!(read("out3"), "hi");
+    run("printf a > out4; printf b ${OXSH_UNSET_X}>> out4");
+    assert_eq!(read("out4"), "ab");
+    run("printf hi $(true)| tr h j > out5");
+    assert_eq!(read("out5"), "ji");
+    run("cat $(true)< out4 > out6");
+    assert_eq!(read("out6"), "ab");
+    // Non-empty output: the operator still ends the word, as in bash.
+    run("printf %s $(echo x)> out7");
+    assert_eq!(read("out7"), "x");
+    run("printf %s \"q\"> out8");
+    assert_eq!(read("out8"), "q");
+    run("printf bg $(true)&")
+        .success()
+        .stdout(predicate::str::contains("[bg] pid="));
+    // Substitution output is still never an operator.
+    run("printf '[%s]' $(echo '>') out9");
+    assert!(!dir.path().join("out9").exists());
+}
+
+/// An empty substitution glued to a command word does not make the word
+/// eligible for alias lookup (`$(true)g` is not the literal word `g`).
+#[test]
+fn empty_substitution_prefix_does_not_select_an_alias() {
+    for call in ["$(true)oxg", "`true`oxg", "${OXSH_UNSET_X}oxg"] {
+        oxsh()
+            .env_remove("OXSH_UNSET_X")
+            .args(["-c", &format!("alias oxg='printf ALIASED'; {call}")])
+            .assert()
+            .stdout(predicate::str::contains("ALIASED").not());
+    }
+}
