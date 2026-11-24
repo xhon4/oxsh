@@ -265,6 +265,7 @@ impl Shell {
                     };
                     self.last_command = input.clone();
 
+                    executor::clear_interrupted();
                     if self.handle_input(&input) {
                         break 'mainloop;
                     }
@@ -337,6 +338,11 @@ impl Shell {
         };
 
         for (segment, op) in chain_segments {
+            // Ctrl-C abandons the rest of the command line, like other shells.
+            if executor::was_interrupted() {
+                self.last_exit_code = 130;
+                break;
+            }
             let segment = segment.trim();
             if segment.is_empty() {
                 continue;
@@ -352,6 +358,10 @@ impl Shell {
                     if builtins::is_exit_signal(self.last_exit_code) {
                         let _ = self.line_editor.sync_history();
                         return true;
+                    }
+                    if executor::was_interrupted() {
+                        self.last_exit_code = 130;
+                        break;
                     }
                 }
                 if should_skip(op, self.last_exit_code) {
@@ -375,6 +385,10 @@ impl Shell {
                 let mut iterations = 0usize;
                 loop {
                     let cond_code = self.execute_line_inner(&while_loop.condition);
+                    if executor::was_interrupted() {
+                        self.last_exit_code = 130;
+                        break;
+                    }
                     if cond_code != 0 {
                         break;
                     }
@@ -382,6 +396,10 @@ impl Shell {
                     if builtins::is_exit_signal(self.last_exit_code) {
                         let _ = self.line_editor.sync_history();
                         return true;
+                    }
+                    if executor::was_interrupted() {
+                        self.last_exit_code = 130;
+                        break;
                     }
                     iterations += 1;
                     if iterations >= max_iter {

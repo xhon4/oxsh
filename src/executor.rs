@@ -4,14 +4,76 @@ use crate::value::Value;
 use std::fs::{File, OpenOptions};
 use std::io::{self, IsTerminal, Read, Write};
 use std::process::{Child, Command as StdCommand, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// PID of the last process spawned in the background (for `$!`). 0 = none.
 pub static LAST_BG_PID: AtomicU32 = AtomicU32::new(0);
 
+/// Set by the interactive SIGINT handler: the user pressed Ctrl-C while a
+/// command was running. The REPL uses it to abandon the rest of the line.
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unix)]
+const SIGINT: i32 = 2;
+#[cfg(unix)]
+const SIGQUIT: i32 = 3;
+
 #[cfg(unix)]
 unsafe extern "C" {
     fn dup2(oldfd: i32, newfd: i32) -> i32;
+    fn signal(signum: i32, handler: usize) -> usize;
+}
+
+#[cfg(unix)]
+extern "C" fn on_interactive_signal(signum: i32) {
+    // Only an atomic store: async-signal-safe.
+    if signum == SIGINT {
+        INTERRUPTED.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Keep the interactive shell alive when the terminal sends SIGINT (Ctrl-C) or
+/// SIGQUIT (Ctrl-\) to the foreground process group while a command runs.
+///
+/// A *handler* is installed rather than `SIG_IGN` on purpose: caught signals
+/// are reset to their default action by `execve`, whereas ignored signals are
+/// inherited, so children still die on Ctrl-C as users expect.
+/// Only called for interactive sessions; `oxsh -c` keeps default dispositions.
+pub fn install_interactive_signal_handlers() {
+    #[cfg(unix)]
+    {
+        let handler = on_interactive_signal as extern "C" fn(i32) as usize;
+        // SAFETY: the handler only performs an atomic store.
+        unsafe {
+            signal(SIGINT, handler);
+            signal(SIGQUIT, handler);
+        }
+    }
+}
+
+/// True if Ctrl-C was pressed since the last `clear_interrupted`.
+pub fn was_interrupted() -> bool {
+    INTERRUPTED.load(Ordering::Relaxed)
+}
+
+pub fn clear_interrupted() {
+    INTERRUPTED.store(false, Ordering::Relaxed);
+}
+
+/// Exit status of a finished child, using the shell convention 128+N when it
+/// was killed by signal N (e.g. 130 for SIGINT).
+fn status_code(status: std::process::ExitStatus) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return 128 + sig;
+        }
+    }
+    1
 }
 
 /// Internal state passed between pipeline stages
@@ -180,7 +242,7 @@ pub fn execute_pipeline(commands: Vec<Command>) -> i32 {
     let mut exit_code = 0;
     for mut child in children {
         match child.wait() {
-            Ok(status) => exit_code = status.code().unwrap_or(1),
+            Ok(status) => exit_code = status_code(status),
             Err(e) => {
                 eprintln!("oxsh: wait error: {e}");
                 exit_code = 1;
@@ -362,7 +424,7 @@ fn execute_single(cmd: &Command) -> i32 {
                 println!("[bg] pid={pid}");
                 0
             } else {
-                child.wait().map(|s| s.code().unwrap_or(1)).unwrap_or(1)
+                child.wait().map(status_code).unwrap_or(1)
             }
         }
         Err(e) => {

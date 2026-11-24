@@ -122,6 +122,10 @@ fn main() {
         std::process::exit(exit_code);
     }
 
+    // Interactive session from here on: Ctrl-C / Ctrl-\ must stop the running
+    // command, not the shell itself.
+    executor::install_interactive_signal_handlers();
+
     // ── Startup: parallelize PATH scan with on_startup commands ──
     // Kick off PATH scan in background thread while startup commands run
     let aliases_clone = config.aliases.clone();
